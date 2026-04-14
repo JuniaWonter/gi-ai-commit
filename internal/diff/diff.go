@@ -3,7 +3,9 @@ package diff
 import (
 	"bufio"
 	"fmt"
+	"os"
 	"os/exec"
+	"path/filepath"
 	"strings"
 )
 
@@ -44,17 +46,38 @@ func GetChangedFiles() ([]FileChange, error) {
 		}
 
 		status := line[:2]
-		if strings.Contains(status, "D") {
+		if strings.Contains(status, "D") && !strings.Contains(status, "D") {
 			continue
 		}
 
 		path := strings.TrimSpace(line[2:])
-		staged := status[0] != ' ' && status[0] != '?'
+		staged := status[0] != ' '
 
 		files = append(files, FileChange{
 			Path:   path,
 			Staged: staged,
 		})
+	}
+
+	if len(files) == 0 {
+		cmd = exec.Command("git", "diff", "--cached", "--name-status")
+		cmd.Dir = gitRoot
+		output, err = cmd.Output()
+		if err == nil && len(output) > 0 {
+			cachedLines := strings.Split(strings.TrimSpace(string(output)), "\n")
+			for _, line := range cachedLines {
+				if len(line) < 2 {
+					continue
+				}
+				parts := strings.Fields(line)
+				if len(parts) >= 2 {
+					files = append(files, FileChange{
+						Path:   parts[1],
+						Staged: true,
+					})
+				}
+			}
+		}
 	}
 
 	return files, nil
@@ -98,11 +121,34 @@ func StageFiles(paths []string) error {
 		return fmt.Errorf("获取 git 根目录失败：%w", err)
 	}
 
-	cmd := exec.Command("git", append([]string{"add"}, paths...)...)
-	cmd.Dir = gitRoot
-	output, err := cmd.CombinedOutput()
-	if err != nil {
-		return fmt.Errorf("暂存文件失败：%w, output: %s", err, string(output))
+	var toStage, toDelete []string
+	for _, p := range paths {
+		if _, err := os.Stat(filepath.Join(gitRoot, p)); os.IsNotExist(err) {
+			toDelete = append(toDelete, p)
+		} else {
+			toStage = append(toStage, p)
+		}
+	}
+
+	if len(toDelete) > 0 {
+		args := []string{"add", "-u"}
+		args = append(args, toDelete...)
+		cmd := exec.Command("git", args...)
+		cmd.Dir = gitRoot
+		if err := cmd.Run(); err != nil {
+			return fmt.Errorf("暂存删除文件失败：%w", err)
+		}
+	}
+
+	if len(toStage) > 0 {
+		args := []string{"add"}
+		args = append(args, toStage...)
+		cmd := exec.Command("git", args...)
+		cmd.Dir = gitRoot
+		output, err := cmd.CombinedOutput()
+		if err != nil {
+			return fmt.Errorf("暂存文件失败：%w, output: %s", err, string(output))
+		}
 	}
 	return nil
 }
