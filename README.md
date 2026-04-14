@@ -1,5 +1,7 @@
 # git-ai-commit
 
+> [English](./README.en.md) | 中文
+
 AI 驱动的 Git commit message 生成工具，使用 DeepSeek API 自动生成符合 Conventional Commits 规范的提交信息。
 
 ## 功能特性
