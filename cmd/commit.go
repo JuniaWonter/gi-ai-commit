@@ -46,29 +46,23 @@ func RunCommit(opts CommitOptions) error {
 	}
 
 	var selectedFiles []string
-	var usingTTY bool
 
 	if opts.DryRun {
-		selectedFiles, usingTTY = selectFilesSimple(files)
+		selectedFiles, _ = selectFilesSimple(files)
 	} else {
-		selectedFiles, err = tui.SelectFiles(files)
+		selectedFiles, _ = tui.SelectFiles(files)
 		if err != nil {
 			if strings.Contains(err.Error(), "no such device") || strings.Contains(err.Error(), "TTY") {
-				selectedFiles, usingTTY = selectFilesSimple(files)
+				selectedFiles, _ = selectFilesSimple(files)
 			} else {
 				return fmt.Errorf("选择文件失败：%w", err)
 			}
-		} else {
-			usingTTY = true
 		}
 	}
 
 	if len(selectedFiles) == 0 {
 		return fmt.Errorf("未选择任何文件")
 	}
-
-	fmt.Printf("DEBUG: selected %d files: %v\n", len(selectedFiles), selectedFiles)
-	fmt.Printf("DEBUG: files from diff.GetChangedFiles: %+v\n", files)
 
 	fmt.Println("📦 暂存文件...")
 	if err := diff.StageFiles(selectedFiles); err != nil {
@@ -181,7 +175,7 @@ func isGitRepo() bool {
 	return cmd.Run() == nil
 }
 
-func selectFilesSimple(files []diff.FileChange) []string {
+func selectFilesSimple(files []diff.FileChange) ([]string, bool) {
 	fmt.Println("📝 选择要提交的文件:")
 	for i, f := range files {
 		fmt.Printf("  %d. %s\n", i+1, f.Path)
@@ -196,7 +190,7 @@ func selectFilesSimple(files []diff.FileChange) []string {
 		for _, f := range files {
 			all = append(all, f.Path)
 		}
-		return all
+		return all, true
 	}
 
 	var selected []string
@@ -207,7 +201,7 @@ func selectFilesSimple(files []diff.FileChange) []string {
 			selected = append(selected, files[idx-1].Path)
 		}
 	}
-	return selected
+	return selected, len(selected) > 0
 }
 
 func getSelectedFilesDiff(files []string) (string, error) {
