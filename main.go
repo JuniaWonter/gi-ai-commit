@@ -1,6 +1,7 @@
 package main
 
 import (
+	"errors"
 	"flag"
 	"fmt"
 	"os"
@@ -21,19 +22,23 @@ func main() {
 		commitCmd := flag.NewFlagSet("commit", flag.ExitOnError)
 		autoConfirm := commitCmd.Bool("y", false, "自动确认提交")
 		autoConfirmLong := commitCmd.Bool("yes", false, "自动确认提交")
+		dryRun := commitCmd.Bool("dry-run", false, "只预览不提交")
+		dryRunShort := commitCmd.Bool("d", false, "只预览不提交")
 
 		commitCmd.Parse(os.Args[2:])
 
-		if *autoConfirm || *autoConfirmLong {
-			if err := cmd.RunCommit(cmd.CommitOptions{AutoConfirm: true}); err != nil {
-				fmt.Fprintf(os.Stderr, "❌ 错误：%v\n", err)
-				os.Exit(1)
+		opts := cmd.CommitOptions{
+			AutoConfirm: *autoConfirm || *autoConfirmLong,
+			DryRun:      *dryRun || *dryRunShort,
+		}
+
+		if err := cmd.RunCommit(opts); err != nil {
+			if errors.Is(err, cmd.ErrUserCancelled) {
+				fmt.Println("❌ 已取消提交")
+				os.Exit(0)
 			}
-		} else {
-			if err := cmd.RunCommit(cmd.CommitOptions{AutoConfirm: false}); err != nil {
-				fmt.Fprintf(os.Stderr, "❌ 错误：%v\n", err)
-				os.Exit(1)
-			}
+			fmt.Fprintf(os.Stderr, "❌ 错误：%v\n", err)
+			os.Exit(1)
 		}
 
 	case "version", "-v", "--version":
