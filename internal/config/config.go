@@ -62,11 +62,28 @@ func Load() (*Config, error) {
 		return nil, fmt.Errorf("解析配置文件失败: %w", err)
 	}
 
+	overrideFromEnv(&config)
+
 	if config.DeepSeek.APIKey == "" {
 		return nil, fmt.Errorf("deepseek.api_key 未配置")
 	}
 
 	return &config, nil
+}
+
+func overrideFromEnv(cfg *Config) {
+	if apiKey := os.Getenv("DEEPSEEK_API_KEY"); apiKey != "" {
+		cfg.DeepSeek.APIKey = apiKey
+	}
+	if model := os.Getenv("DEEPSEEK_MODEL"); model != "" {
+		cfg.DeepSeek.Model = model
+	}
+	if baseURL := os.Getenv("DEEPSEEK_BASE_URL"); baseURL != "" {
+		cfg.DeepSeek.BaseURL = baseURL
+	}
+	if timeout := os.Getenv("DEEPSEEK_TIMEOUT"); timeout != "" {
+		cfg.DeepSeek.Timeout = timeout
+	}
 }
 
 func Save(config *Config) error {

@@ -18,7 +18,7 @@ type DeepSeekConfig struct {
 	APIKey  string
 	Model   string
 	BaseURL string
-	Timeout int
+	Timeout time.Duration
 }
 
 func NewDeepSeekClient(config DeepSeekConfig) (*DeepSeekClient, error) {
@@ -32,6 +32,11 @@ func NewDeepSeekClient(config DeepSeekConfig) (*DeepSeekClient, error) {
 	}
 
 	client := openai.NewClientWithConfig(c)
+
+	if config.Timeout == 0 {
+		config.Timeout = 30 * time.Second
+	}
+
 	return &DeepSeekClient{
 		client: client,
 		config: config,
@@ -56,8 +61,7 @@ func (c *DeepSeekClient) GenerateCommitMessage(diff, description string) (string
 		Temperature: 0.3,
 	}
 
-	ctx, cancel := context.WithTimeout(context.Background(),
-		time.Duration(c.config.Timeout)*time.Second)
+	ctx, cancel := context.WithTimeout(context.Background(), c.config.Timeout)
 	defer cancel()
 
 	resp, err := c.client.CreateChatCompletion(ctx, req)
@@ -107,8 +111,7 @@ func (c *DeepSeekClient) GenerateDescription(projectInfo, fileInfo, diff string)
 		Temperature: 0.5,
 	}
 
-	ctx, cancel := context.WithTimeout(context.Background(),
-		time.Duration(c.config.Timeout)*time.Second)
+	ctx, cancel := context.WithTimeout(context.Background(), c.config.Timeout)
 	defer cancel()
 
 	resp, err := c.client.CreateChatCompletion(ctx, req)
