@@ -23,7 +23,13 @@ type DiffSummary struct {
 }
 
 func GetChangedFiles() ([]FileChange, error) {
+	gitRoot, err := getGitRoot()
+	if err != nil {
+		return nil, fmt.Errorf("获取 git 根目录失败：%w", err)
+	}
+
 	cmd := exec.Command("git", "status", "--porcelain")
+	cmd.Dir = gitRoot
 	output, err := cmd.Output()
 	if err != nil {
 		return nil, fmt.Errorf("获取 git 状态失败：%w", err)
@@ -33,7 +39,7 @@ func GetChangedFiles() ([]FileChange, error) {
 	var files []FileChange
 
 	for _, line := range lines {
-		if len(line) < 4 {
+		if len(line) < 3 {
 			continue
 		}
 
@@ -42,7 +48,7 @@ func GetChangedFiles() ([]FileChange, error) {
 			continue
 		}
 
-		path := strings.TrimSpace(line[3:])
+		path := strings.TrimSpace(line[2:])
 		staged := status[0] != ' ' && status[0] != '?'
 
 		files = append(files, FileChange{
@@ -87,12 +93,27 @@ func StageFiles(paths []string) error {
 		return nil
 	}
 
-	args := append([]string{"add"}, paths...)
-	cmd := exec.Command("git", args...)
-	if err := cmd.Run(); err != nil {
-		return fmt.Errorf("暂存文件失败：%w", err)
+	gitRoot, err := getGitRoot()
+	if err != nil {
+		return fmt.Errorf("获取 git 根目录失败：%w", err)
+	}
+
+	cmd := exec.Command("git", append([]string{"add"}, paths...)...)
+	cmd.Dir = gitRoot
+	output, err := cmd.CombinedOutput()
+	if err != nil {
+		return fmt.Errorf("暂存文件失败：%w, output: %s", err, string(output))
 	}
 	return nil
+}
+
+func getGitRoot() (string, error) {
+	cmd := exec.Command("git", "rev-parse", "--show-toplevel")
+	output, err := cmd.Output()
+	if err != nil {
+		return "", fmt.Errorf("获取 git 根目录失败：%w", err)
+	}
+	return strings.TrimSpace(string(output)), nil
 }
 
 func LimitDiffLines(diff string, maxLines int) string {
