@@ -1,0 +1,230 @@
+package cmd
+
+import (
+	"bufio"
+	"fmt"
+	"os"
+	"os/exec"
+	"strings"
+
+	"github.com/oliver/git-ai-commit/internal/ai"
+	"github.com/oliver/git-ai-commit/internal/config"
+	"github.com/oliver/git-ai-commit/internal/counter"
+	"github.com/oliver/git-ai-commit/internal/description"
+	"github.com/oliver/git-ai-commit/internal/diff"
+	"github.com/oliver/git-ai-commit/internal/project"
+	"github.com/oliver/git-ai-commit/tui"
+)
+
+type CommitOptions struct {
+	AutoConfirm bool
+}
+
+func RunCommit(opts CommitOptions) error {
+	fmt.Println("📊 检查 Git 仓库...")
+	if !isGitRepo() {
+		return fmt.Errorf("当前目录不是 Git 仓库")
+	}
+
+	fmt.Println("📊 获取变更文件...")
+	files, err := diff.GetChangedFiles()
+	if err != nil {
+		return fmt.Errorf("获取变更文件失败：%w", err)
+	}
+
+	if len(files) == 0 {
+		return fmt.Errorf("没有变更的文件")
+	}
+
+	fmt.Println("📝 选择要提交的文件...")
+	selectedFiles, err := tui.SelectFiles(files)
+	if err != nil {
+		return fmt.Errorf("选择文件失败：%w", err)
+	}
+
+	if len(selectedFiles) == 0 {
+		return fmt.Errorf("未选择任何文件")
+	}
+
+	fmt.Println("📦 暂存文件...")
+	if err := diff.StageFiles(selectedFiles); err != nil {
+		return fmt.Errorf("暂存文件失败：%w", err)
+	}
+
+	fmt.Println("📊 获取代码变更...")
+	diffContent, err := getSelectedFilesDiff(selectedFiles)
+	if err != nil {
+		return fmt.Errorf("获取 diff 失败：%w", err)
+	}
+
+	if strings.TrimSpace(diffContent) == "" {
+		return fmt.Errorf("选中的文件没有实际变更")
+	}
+
+	fmt.Println("⚙️  加载配置...")
+	cfg, err := config.Load()
+	if err != nil {
+		return fmt.Errorf("加载配置失败：%w", err)
+	}
+
+	fmt.Println("🤖 初始化 AI 客户端...")
+	client, err := ai.NewDeepSeekClient(ai.DeepSeekConfig{
+		APIKey:  cfg.DeepSeek.APIKey,
+		Model:   cfg.DeepSeek.Model,
+		BaseURL: cfg.DeepSeek.BaseURL,
+		Timeout: 30,
+	})
+	if err != nil {
+		return fmt.Errorf("初始化 AI 客户端失败：%w", err)
+	}
+
+	fmt.Println("📋 检查仓库描述...")
+	desc, _, err := handleDescription(client, diffContent, selectedFiles, cfg)
+	if err != nil {
+		return fmt.Errorf("处理描述失败：%w", err)
+	}
+
+	fmt.Println("🤖 生成 commit message...")
+	formattedDiff := diff.FormatDiffForAI(diffContent, cfg.Commit.MaxDiffLines)
+	commitMessage, err := client.GenerateCommitMessage(formattedDiff, desc)
+	if err != nil {
+		return fmt.Errorf("生成 commit message 失败：%w", err)
+	}
+
+	fmt.Println("\n📝 生成的 commit message:")
+	fmt.Println(strings.Repeat("─", 50))
+	fmt.Println(commitMessage)
+	fmt.Println(strings.Repeat("─", 50))
+
+	if !opts.AutoConfirm {
+		fmt.Print("\n确认提交？(Y/n): ")
+		reader := bufio.NewReader(os.Stdin)
+		input, err := reader.ReadString('\n')
+		if err != nil {
+			return fmt.Errorf("读取输入失败：%w", err)
+		}
+
+		input = strings.TrimSpace(strings.ToLower(input))
+		if input == "n" || input == "no" {
+			return fmt.Errorf("用户取消提交")
+		}
+	}
+
+	fmt.Println("✅ 提交中...")
+	if err := executeCommit(commitMessage); err != nil {
+		return fmt.Errorf("执行提交失败：%w", err)
+	}
+
+	fmt.Println("📊 更新计数...")
+	if err := counter.Increment(); err != nil {
+		return fmt.Errorf("更新计数失败：%w", err)
+	}
+
+	fmt.Println("✅ 提交成功!")
+	return nil
+}
+
+func isGitRepo() bool {
+	cmd := exec.Command("git", "rev-parse", "--git-dir")
+	return cmd.Run() == nil
+}
+
+func getSelectedFilesDiff(files []string) (string, error) {
+	var builder strings.Builder
+
+	for _, file := range files {
+		fileDiff, err := diff.GetFileDiff(file)
+		if err != nil {
+			continue
+		}
+		builder.WriteString(fileDiff)
+		builder.WriteString("\n")
+	}
+
+	return builder.String(), nil
+}
+
+func handleDescription(client *ai.DeepSeekClient, diffContent string, files []string, cfg *config.Config) (string, bool, error) {
+	exists, err := description.Exists()
+	if err != nil {
+		return "", false, err
+	}
+
+	count, err := counter.Get()
+	if err != nil {
+		return "", false, err
+	}
+
+	const updateInterval = 10
+
+	projRoot, err := getProjectRoot()
+	if err != nil {
+		return "", false, err
+	}
+
+	projectInfo, err := project.GetSummary(projRoot)
+	if err != nil {
+		return "", false, err
+	}
+
+	fileInfo, err := project.GetFileSummary(projRoot, files)
+	if err != nil {
+		return "", false, err
+	}
+
+	if !exists {
+		fmt.Println("📝 首次提交，生成仓库描述...")
+		limitedDiff := diff.LimitDiffLines(diffContent, 100)
+		desc, err := client.GenerateDescription(projectInfo, fileInfo, limitedDiff)
+		if err != nil {
+			return "", false, fmt.Errorf("生成描述失败：%w", err)
+		}
+
+		if err := description.Write(desc); err != nil {
+			return "", false, fmt.Errorf("保存描述失败：%w", err)
+		}
+
+		fmt.Println("✅ 仓库描述已创建")
+		return desc, true, nil
+	}
+
+	if description.ShouldUpdate(count, updateInterval) {
+		fmt.Println("📝 达到更新间隔，更新仓库描述...")
+		limitedDiff := diff.LimitDiffLines(diffContent, 100)
+		desc, err := client.GenerateDescription(projectInfo, fileInfo, limitedDiff)
+		if err != nil {
+			desc, _ = description.Read()
+			return desc, true, nil
+		}
+
+		if err := description.Write(desc); err != nil {
+			return "", false, fmt.Errorf("更新描述失败：%w", err)
+		}
+
+		fmt.Println("✅ 仓库描述已更新")
+		return desc, true, nil
+	}
+
+	desc, err := description.Read()
+	if err != nil {
+		return "", false, err
+	}
+
+	return desc, true, nil
+}
+
+func executeCommit(message string) error {
+	cmd := exec.Command("git", "commit", "-m", message)
+	cmd.Stdout = os.Stdout
+	cmd.Stderr = os.Stderr
+	return cmd.Run()
+}
+
+func getProjectRoot() (string, error) {
+	cmd := exec.Command("git", "rev-parse", "--show-toplevel")
+	output, err := cmd.Output()
+	if err != nil {
+		return "", fmt.Errorf("获取项目根目录失败：%w", err)
+	}
+	return strings.TrimSpace(string(output)), nil
+}

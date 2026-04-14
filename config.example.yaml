@@ -1,0 +1,22 @@
+# DeepSeek API 配置
+deepseek:
+  # API Key (必填)
+  # 从 https://platform.deepseek.com 获取
+  api_key: "sk-your-api-key-here"
+  
+  # 模型名称
+  model: "deepseek-chat"
+  
+  # API 基础 URL
+  base_url: "https://api.deepseek.com"
+  
+  # 请求超时时间
+  timeout: "30s"
+
+# Commit 配置
+commit:
+  # 默认 scope (可留空)
+  default_scope: ""
+  
+  # Diff 最大行数，避免 token 超限
+  max_diff_lines: 500

@@ -1,0 +1,237 @@
+package diff
+
+import (
+	"bufio"
+	"fmt"
+	"os/exec"
+	"strings"
+)
+
+type FileChange struct {
+	Path     string
+	Staged   bool
+	Selected bool
+}
+
+type DiffSummary struct {
+	TotalFiles    int
+	AddedFiles    int
+	ModifiedFiles int
+	DeletedFiles  int
+	FileTypes     map[string]int
+	LargeFiles    []string
+}
+
+func GetChangedFiles() ([]FileChange, error) {
+	cmd := exec.Command("git", "status", "--porcelain")
+	output, err := cmd.Output()
+	if err != nil {
+		return nil, fmt.Errorf("获取 git 状态失败：%w", err)
+	}
+
+	lines := strings.Split(strings.TrimSpace(string(output)), "\n")
+	var files []FileChange
+
+	for _, line := range lines {
+		if len(line) < 4 {
+			continue
+		}
+
+		status := line[:2]
+		if strings.Contains(status, "D") {
+			continue
+		}
+
+		path := strings.TrimSpace(line[3:])
+		staged := status[0] != ' ' && status[0] != '?'
+
+		files = append(files, FileChange{
+			Path:   path,
+			Staged: staged,
+		})
+	}
+
+	return files, nil
+}
+
+func GetFileDiff(filePath string) (string, error) {
+	cmd := exec.Command("git", "diff", "--cached", "--", filePath)
+	output, err := cmd.Output()
+	if err != nil {
+		cmd = exec.Command("git", "diff", "--", filePath)
+		output, err = cmd.Output()
+		if err != nil {
+			return "", fmt.Errorf("获取文件 diff 失败：%w", err)
+		}
+	}
+
+	diff := strings.TrimSpace(string(output))
+	if diff == "" {
+		return "", fmt.Errorf("文件 %s 没有变更", filePath)
+	}
+
+	return diff, nil
+}
+
+func GetStagedDiff() (string, error) {
+	cmd := exec.Command("git", "diff", "--cached")
+	output, err := cmd.Output()
+	if err != nil {
+		return "", fmt.Errorf("获取暂存区 diff 失败：%w", err)
+	}
+	return string(output), nil
+}
+
+func StageFiles(paths []string) error {
+	if len(paths) == 0 {
+		return nil
+	}
+
+	args := append([]string{"add"}, paths...)
+	cmd := exec.Command("git", args...)
+	if err := cmd.Run(); err != nil {
+		return fmt.Errorf("暂存文件失败：%w", err)
+	}
+	return nil
+}
+
+func LimitDiffLines(diff string, maxLines int) string {
+	lines := strings.Split(diff, "\n")
+	if len(lines) <= maxLines {
+		return diff
+	}
+
+	truncated := strings.Join(lines[:maxLines], "\n")
+	return truncated + fmt.Sprintf("\n... (还有 %d 行被截断)", len(lines)-maxLines)
+}
+
+func AnalyzeDiffSummary(diffContent string) *DiffSummary {
+	summary := &DiffSummary{
+		FileTypes: make(map[string]int),
+	}
+
+	scanner := bufio.NewScanner(strings.NewReader(diffContent))
+	var currentFile string
+
+	for scanner.Scan() {
+		line := scanner.Text()
+
+		if strings.HasPrefix(line, "diff --git") {
+			parts := strings.Fields(line)
+			if len(parts) >= 4 {
+				currentFile = parts[2]
+				if strings.HasPrefix(currentFile, "a/") {
+					currentFile = currentFile[2:]
+				}
+				summary.TotalFiles++
+			}
+		} else if strings.HasPrefix(line, "+++") && currentFile != "" {
+			ext := getFileExt(currentFile)
+			summary.FileTypes[ext]++
+		} else if strings.HasPrefix(line, "+") && !strings.HasPrefix(line, "+++") {
+			summary.ModifiedFiles++
+		} else if strings.HasPrefix(line, "-") && !strings.HasPrefix(line, "---") {
+			summary.DeletedFiles++
+		}
+	}
+
+	return summary
+}
+
+func getFileExt(path string) string {
+	parts := strings.Split(path, ".")
+	if len(parts) >= 2 {
+		return "." + parts[len(parts)-1]
+	}
+	return ""
+}
+
+func GetSmartDiffSummary(files []string) string {
+	var summary strings.Builder
+
+	cmd := exec.Command("git", "diff", "--stat")
+	output, err := cmd.Output()
+	if err == nil {
+		summary.WriteString("变更统计：\n")
+		summary.WriteString(string(output))
+	}
+
+	cmd = exec.Command("git", "diff", "--numstat")
+	output, err = cmd.Output()
+	if err == nil {
+		summary.WriteString("\n\n行数统计：\n")
+
+		scanner := bufio.NewScanner(strings.NewReader(string(output)))
+		var largeChanges []string
+		totalAdded := 0
+		totalDeleted := 0
+
+		for scanner.Scan() {
+			line := scanner.Text()
+			parts := strings.Fields(line)
+			if len(parts) >= 3 {
+				var added, deleted int
+				fmt.Sscanf(parts[0], "%d", &added)
+				fmt.Sscanf(parts[1], "%d", &deleted)
+				totalAdded += added
+				totalDeleted += deleted
+
+				if added+deleted > 200 {
+					largeChanges = append(largeChanges, fmt.Sprintf("  %s: +%d -%d", parts[2], added, deleted))
+				}
+			}
+		}
+
+		summary.WriteString(fmt.Sprintf("总计：新增 %d 行，删除 %d 行\n", totalAdded, totalDeleted))
+
+		if len(largeChanges) > 0 {
+			summary.WriteString("\n较大变更文件：\n")
+			for _, f := range largeChanges {
+				summary.WriteString(f + "\n")
+			}
+		}
+	}
+
+	return summary.String()
+}
+
+func GetDetailedDiffInfo(files []string) string {
+	var info strings.Builder
+
+	info.WriteString("变更文件列表：\n")
+	for i, f := range files {
+		info.WriteString(fmt.Sprintf("  %d. %s\n", i+1, f))
+	}
+
+	stat := GetSmartDiffSummary(files)
+	if stat != "" {
+		info.WriteString("\n" + stat)
+	}
+
+	return info.String()
+}
+
+func FormatDiffForAI(diffContent string, maxLines int) string {
+	lines := strings.Split(diffContent, "\n")
+
+	if len(lines) <= maxLines {
+		return diffContent
+	}
+
+	var result strings.Builder
+
+	result.WriteString("以下是变更的摘要：\n\n")
+
+	summary := AnalyzeDiffSummary(diffContent)
+	result.WriteString(fmt.Sprintf("变更文件数：%d\n", summary.TotalFiles))
+	result.WriteString("文件类型分布：\n")
+	for ext, count := range summary.FileTypes {
+		result.WriteString(fmt.Sprintf("  %s: %d 个文件\n", ext, count))
+	}
+
+	result.WriteString(fmt.Sprintf("\n详细 diff (前 %d 行):\n", maxLines))
+	result.WriteString(strings.Join(lines[:maxLines], "\n"))
+	result.WriteString(fmt.Sprintf("\n\n... (共 %d 行，截断 %d 行)", len(lines), len(lines)-maxLines))
+
+	return result.String()
+}
