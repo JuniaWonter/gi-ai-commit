@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"os"
 	"os/exec"
+	"strconv"
 	"strings"
 
 	"github.com/oliver/git-ai-commit/internal/ai"
@@ -45,14 +46,20 @@ func RunCommit(opts CommitOptions) error {
 	}
 
 	var selectedFiles []string
+	var usingTTY bool
 
 	if opts.DryRun {
-		selectedFiles = selectFilesSimple(files)
+		selectedFiles, usingTTY = selectFilesSimple(files)
 	} else {
-		fmt.Println("📝 选择要提交的文件...")
 		selectedFiles, err = tui.SelectFiles(files)
 		if err != nil {
-			return fmt.Errorf("选择文件失败：%w", err)
+			if strings.Contains(err.Error(), "no such device") || strings.Contains(err.Error(), "TTY") {
+				selectedFiles, usingTTY = selectFilesSimple(files)
+			} else {
+				return fmt.Errorf("选择文件失败：%w", err)
+			}
+		} else {
+			usingTTY = true
 		}
 	}
 
@@ -172,6 +179,35 @@ func RunCommit(opts CommitOptions) error {
 func isGitRepo() bool {
 	cmd := exec.Command("git", "rev-parse", "--git-dir")
 	return cmd.Run() == nil
+}
+
+func selectFilesSimple(files []diff.FileChange) []string {
+	fmt.Println("📝 选择要提交的文件:")
+	for i, f := range files {
+		fmt.Printf("  %d. %s\n", i+1, f.Path)
+	}
+	fmt.Print("输入要提交的文件编号（多个用逗号分隔，直接回车选择全部）: ")
+	reader := bufio.NewReader(os.Stdin)
+	input, _ := reader.ReadString('\n')
+	input = strings.TrimSpace(input)
+
+	if input == "" {
+		var all []string
+		for _, f := range files {
+			all = append(all, f.Path)
+		}
+		return all
+	}
+
+	var selected []string
+	parts := strings.Split(input, ",")
+	for _, p := range parts {
+		p = strings.TrimSpace(p)
+		if idx, err := strconv.Atoi(p); err == nil && idx > 0 && idx <= len(files) {
+			selected = append(selected, files[idx-1].Path)
+		}
+	}
+	return selected
 }
 
 func getSelectedFilesDiff(files []string) (string, error) {
