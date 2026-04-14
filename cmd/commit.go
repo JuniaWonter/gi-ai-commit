@@ -44,10 +44,16 @@ func RunCommit(opts CommitOptions) error {
 		return fmt.Errorf("没有变更的文件")
 	}
 
-	fmt.Println("📝 选择要提交的文件...")
-	selectedFiles, err := tui.SelectFiles(files)
-	if err != nil {
-		return fmt.Errorf("选择文件失败：%w", err)
+	var selectedFiles []string
+
+	if opts.DryRun {
+		selectedFiles = selectFilesSimple(files)
+	} else {
+		fmt.Println("📝 选择要提交的文件...")
+		selectedFiles, err = tui.SelectFiles(files)
+		if err != nil {
+			return fmt.Errorf("选择文件失败：%w", err)
+		}
 	}
 
 	if len(selectedFiles) == 0 {
