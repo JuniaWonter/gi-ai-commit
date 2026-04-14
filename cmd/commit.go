@@ -2,6 +2,7 @@ package cmd
 
 import (
 	"bufio"
+	"errors"
 	"fmt"
 	"os"
 	"os/exec"
@@ -12,12 +13,19 @@ import (
 	"github.com/oliver/git-ai-commit/internal/counter"
 	"github.com/oliver/git-ai-commit/internal/description"
 	"github.com/oliver/git-ai-commit/internal/diff"
+	"github.com/oliver/git-ai-commit/internal/loading"
 	"github.com/oliver/git-ai-commit/internal/project"
 	"github.com/oliver/git-ai-commit/tui"
 )
 
+var (
+	errUserCancelled = errors.New("用户取消提交")
+	ErrUserCancelled = errUserCancelled
+)
+
 type CommitOptions struct {
 	AutoConfirm bool
+	DryRun      bool
 }
 
 func RunCommit(opts CommitOptions) error {
@@ -46,13 +54,33 @@ func RunCommit(opts CommitOptions) error {
 		return fmt.Errorf("未选择任何文件")
 	}
 
+	fmt.Printf("DEBUG: selected %d files: %v\n", len(selectedFiles), selectedFiles)
+	fmt.Printf("DEBUG: files from diff.GetChangedFiles: %+v\n", files)
+
 	fmt.Println("📦 暂存文件...")
 	if err := diff.StageFiles(selectedFiles); err != nil {
-		return fmt.Errorf("暂存文件失败：%w", err)
+		return err
 	}
 
+	var diffContent string
+	var cfg *config.Config
+	var client *ai.DeepSeekClient
+	var desc string
+
+	success := false
+	defer func() {
+		if !success && !opts.DryRun {
+			fmt.Println("🔄 回滚暂存的文件...")
+			if err := resetStagedFiles(selectedFiles); err != nil {
+				fmt.Printf("⚠️  回滚失败: %v\n", err)
+			} else {
+				fmt.Println("✅ 已回滚")
+			}
+		}
+	}()
+
 	fmt.Println("📊 获取代码变更...")
-	diffContent, err := getSelectedFilesDiff(selectedFiles)
+	diffContent, err = getSelectedFilesDiff(selectedFiles)
 	if err != nil {
 		return fmt.Errorf("获取 diff 失败：%w", err)
 	}
@@ -62,31 +90,35 @@ func RunCommit(opts CommitOptions) error {
 	}
 
 	fmt.Println("⚙️  加载配置...")
-	cfg, err := config.Load()
+	cfg, err = config.Load()
 	if err != nil {
 		return fmt.Errorf("加载配置失败：%w", err)
 	}
 
 	fmt.Println("🤖 初始化 AI 客户端...")
-	client, err := ai.NewDeepSeekClient(ai.DeepSeekConfig{
+	client, err = ai.NewDeepSeekClient(ai.DeepSeekConfig{
 		APIKey:  cfg.DeepSeek.APIKey,
 		Model:   cfg.DeepSeek.Model,
 		BaseURL: cfg.DeepSeek.BaseURL,
-		Timeout: 30,
+		Timeout: cfg.DeepSeek.GetTimeout(),
 	})
 	if err != nil {
 		return fmt.Errorf("初始化 AI 客户端失败：%w", err)
 	}
 
 	fmt.Println("📋 检查仓库描述...")
-	desc, _, err := handleDescription(client, diffContent, selectedFiles, cfg)
+	desc, _, err = handleDescription(client, diffContent, selectedFiles, cfg)
 	if err != nil {
 		return fmt.Errorf("处理描述失败：%w", err)
 	}
 
 	fmt.Println("🤖 生成 commit message...")
 	formattedDiff := diff.FormatDiffForAI(diffContent, cfg.Commit.MaxDiffLines)
+
+	spinner := loading.New("正在生成 commit message...")
+	spinner.Start()
 	commitMessage, err := client.GenerateCommitMessage(formattedDiff, desc)
+	spinner.Stop("生成完成")
 	if err != nil {
 		return fmt.Errorf("生成 commit message 失败：%w", err)
 	}
@@ -106,8 +138,14 @@ func RunCommit(opts CommitOptions) error {
 
 		input = strings.TrimSpace(strings.ToLower(input))
 		if input == "n" || input == "no" {
-			return fmt.Errorf("用户取消提交")
+			return errUserCancelled
 		}
+	}
+
+	if opts.DryRun {
+		fmt.Println("🔍 Dry-run 模式，不执行提交")
+		success = true
+		return nil
 	}
 
 	fmt.Println("✅ 提交中...")
@@ -121,6 +159,7 @@ func RunCommit(opts CommitOptions) error {
 	}
 
 	fmt.Println("✅ 提交成功!")
+	success = true
 	return nil
 }
 
@@ -175,7 +214,11 @@ func handleDescription(client *ai.DeepSeekClient, diffContent string, files []st
 	if !exists {
 		fmt.Println("📝 首次提交，生成仓库描述...")
 		limitedDiff := diff.LimitDiffLines(diffContent, 100)
+
+		spinner := loading.New("正在生成项目描述...")
+		spinner.Start()
 		desc, err := client.GenerateDescription(projectInfo, fileInfo, limitedDiff)
+		spinner.Stop("生成完成")
 		if err != nil {
 			return "", false, fmt.Errorf("生成描述失败：%w", err)
 		}
@@ -191,7 +234,11 @@ func handleDescription(client *ai.DeepSeekClient, diffContent string, files []st
 	if description.ShouldUpdate(count, updateInterval) {
 		fmt.Println("📝 达到更新间隔，更新仓库描述...")
 		limitedDiff := diff.LimitDiffLines(diffContent, 100)
+
+		spinner := loading.New("正在更新项目描述...")
+		spinner.Start()
 		desc, err := client.GenerateDescription(projectInfo, fileInfo, limitedDiff)
+		spinner.Stop("更新完成")
 		if err != nil {
 			desc, _ = description.Read()
 			return desc, true, nil
@@ -227,4 +274,20 @@ func getProjectRoot() (string, error) {
 		return "", fmt.Errorf("获取项目根目录失败：%w", err)
 	}
 	return strings.TrimSpace(string(output)), nil
+}
+
+func resetStagedFiles(files []string) error {
+	if len(files) == 0 {
+		return nil
+	}
+
+	gitRoot, err := getProjectRoot()
+	if err != nil {
+		return err
+	}
+
+	args := append([]string{"reset"}, files...)
+	cmd := exec.Command("git", args...)
+	cmd.Dir = gitRoot
+	return cmd.Run()
 }
