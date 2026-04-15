@@ -10,8 +10,9 @@ import (
 )
 
 type Config struct {
-	DeepSeek DeepSeekConfig `yaml:"deepseek"`
-	Commit   CommitConfig   `yaml:"commit"`
+	DeepSeek   DeepSeekConfig   `yaml:"deepseek"`
+	Commit     CommitConfig     `yaml:"commit"`
+	DiffPrompt DiffPromptConfig `yaml:"diff_prompt"`
 }
 
 type DeepSeekConfig struct {
@@ -26,6 +27,13 @@ type CommitConfig struct {
 	MaxDiffLines int    `yaml:"max_diff_lines"`
 }
 
+type DiffPromptConfig struct {
+	MaxFullDiffBytes    int `yaml:"max_full_diff_bytes"`
+	MaxCompactDiffBytes int `yaml:"max_compact_diff_bytes"`
+	MaxPerFileDiffBytes int `yaml:"max_per_file_diff_bytes"`
+	MaxCompactDiffFiles int `yaml:"max_compact_diff_files"`
+}
+
 var defaultConfig = Config{
 	DeepSeek: DeepSeekConfig{
 		Model:   "deepseek-chat",
@@ -35,6 +43,12 @@ var defaultConfig = Config{
 	Commit: CommitConfig{
 		DefaultScope: "",
 		MaxDiffLines: 500,
+	},
+	DiffPrompt: DiffPromptConfig{
+		MaxFullDiffBytes:    24_000,
+		MaxCompactDiffBytes: 16_000,
+		MaxPerFileDiffBytes: 2_200,
+		MaxCompactDiffFiles: 12,
 	},
 }
 
@@ -62,6 +76,8 @@ func Load() (*Config, error) {
 		return nil, fmt.Errorf("解析配置文件失败: %w", err)
 	}
 
+	config.applyDefaults()
+
 	overrideFromEnv(&config)
 
 	if config.DeepSeek.APIKey == "" {
@@ -83,6 +99,22 @@ func overrideFromEnv(cfg *Config) {
 	}
 	if timeout := os.Getenv("DEEPSEEK_TIMEOUT"); timeout != "" {
 		cfg.DeepSeek.Timeout = timeout
+	}
+}
+
+func (c *Config) applyDefaults() {
+	defaults := defaultConfig.DiffPrompt
+	if c.DiffPrompt.MaxFullDiffBytes <= 0 {
+		c.DiffPrompt.MaxFullDiffBytes = defaults.MaxFullDiffBytes
+	}
+	if c.DiffPrompt.MaxCompactDiffBytes <= 0 {
+		c.DiffPrompt.MaxCompactDiffBytes = defaults.MaxCompactDiffBytes
+	}
+	if c.DiffPrompt.MaxPerFileDiffBytes <= 0 {
+		c.DiffPrompt.MaxPerFileDiffBytes = defaults.MaxPerFileDiffBytes
+	}
+	if c.DiffPrompt.MaxCompactDiffFiles <= 0 {
+		c.DiffPrompt.MaxCompactDiffFiles = defaults.MaxCompactDiffFiles
 	}
 }
 

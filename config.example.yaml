@@ -20,3 +20,14 @@ commit:
   
   # Diff 最大行数，避免 token 超限
   max_diff_lines: 500
+
+# Diff 处理配置（三级降级策略）
+diff_prompt:
+  # 完整 diff 最大字节数（约 24KB）
+  max_full_diff_bytes: 24000
+  # 压缩摘要最大字节数（约 16KB）
+  max_compact_diff_bytes: 16000
+  # 单文件 diff 最大字节数（约 2.2KB）
+  max_per_file_diff_bytes: 2200
+  # 压缩摘要最大文件数
+  max_compact_diff_files: 12
