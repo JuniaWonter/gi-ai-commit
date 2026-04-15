@@ -86,20 +86,35 @@ func RunCommit(opts CommitOptions) error {
 		}
 	}()
 
-	fmt.Println("📊 获取代码变更...")
-	diffContent, err = getSelectedFilesDiff(selectedFiles)
-	if err != nil {
-		return fmt.Errorf("获取 diff 失败：%w", err)
-	}
-
-	if strings.TrimSpace(diffContent) == "" {
-		return fmt.Errorf("选中的文件没有实际变更")
-	}
-
 	fmt.Println("⚙️  加载配置...")
 	cfg, err = config.Load()
 	if err != nil {
 		return fmt.Errorf("加载配置失败：%w", err)
+	}
+
+	fmt.Println("📊 获取代码变更...")
+	gitRoot, err := getProjectRoot()
+	if err != nil {
+		return fmt.Errorf("获取项目根目录失败：%w", err)
+	}
+
+	diffProcessor := diff.NewDiffProcessor(diff.DiffPromptConfig{
+		MaxFullDiffBytes:    cfg.DiffPrompt.MaxFullDiffBytes,
+		MaxCompactDiffBytes: cfg.DiffPrompt.MaxCompactDiffBytes,
+		MaxPerFileDiffBytes: cfg.DiffPrompt.MaxPerFileDiffBytes,
+		MaxCompactDiffFiles: cfg.DiffPrompt.MaxCompactDiffFiles,
+	}, gitRoot)
+
+	payloads, err := diffProcessor.BuildPayloadsForFiles(selectedFiles)
+	if err != nil || len(payloads) == 0 {
+		return fmt.Errorf("没有检测到任何代码变更")
+	}
+
+	diffContent = payloads[0].Content
+	diffMode := payloads[0].Mode
+
+	if strings.TrimSpace(diffContent) == "" {
+		return fmt.Errorf("选中的文件没有实际变更")
 	}
 
 	fmt.Println("🤖 初始化 AI 客户端...")
@@ -120,11 +135,13 @@ func RunCommit(opts CommitOptions) error {
 	}
 
 	fmt.Println("🤖 生成 commit message...")
-	formattedDiff := diff.FormatDiffForAI(diffContent, cfg.Commit.MaxDiffLines)
+	if diffMode != "完整 diff" {
+		fmt.Printf("ℹ️  变更较大，已使用 %s 模式\n", diffMode)
+	}
 
 	spinner := loading.New("正在生成 commit message...")
 	spinner.Start()
-	commitMessage, err := client.GenerateCommitMessage(formattedDiff, desc)
+	commitMessage, err := client.GenerateCommitMessage(diffContent, desc)
 	spinner.Stop("生成完成")
 	if err != nil {
 		return fmt.Errorf("生成 commit message 失败：%w", err)
@@ -202,21 +219,6 @@ func selectFilesSimple(files []diff.FileChange) ([]string, bool) {
 		}
 	}
 	return selected, len(selected) > 0
-}
-
-func getSelectedFilesDiff(files []string) (string, error) {
-	var builder strings.Builder
-
-	for _, file := range files {
-		fileDiff, err := diff.GetFileDiff(file)
-		if err != nil {
-			continue
-		}
-		builder.WriteString(fileDiff)
-		builder.WriteString("\n")
-	}
-
-	return builder.String(), nil
 }
 
 func handleDescription(client *ai.DeepSeekClient, diffContent string, files []string, cfg *config.Config) (string, bool, error) {
