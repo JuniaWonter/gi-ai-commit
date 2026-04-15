@@ -1,20 +1,22 @@
 .PHONY: build install clean test config
 
+BUILD_NAME=git-ai
+
 build:
-	go build -o git-ai-commit
+	go build -o $(BUILD_NAME)
 
 install: build
-	@echo "安装 git-ai-commit..."
+	@echo "安装 $(BUILD_NAME)..."
 	@mkdir -p $(shell go env GOPATH)/bin
-	@cp git-ai-commit $(shell go env GOPATH)/bin/
-	@chmod +x $(shell go env GOPATH)/bin/git-ai-commit
+	@cp $(BUILD_NAME) $(shell go env GOPATH)/bin/
+	@chmod +x $(shell go env GOPATH)/bin/$(BUILD_NAME)
 	@echo "✅ 安装完成"
 	@$(MAKE) config
 
 install-local: build
 	@echo "安装到当前目录..."
-	@cp git-ai-commit /usr/local/bin/git-ai-commit
-	@chmod +x /usr/local/bin/git-ai-commit
+	@cp $(BUILD_NAME) /usr/local/bin/$(BUILD_NAME)
+	@chmod +x /usr/local/bin/$(BUILD_NAME)
 	@echo "✅ 安装完成"
 	@$(MAKE) config
 
@@ -31,12 +33,12 @@ config:
 
 git-alias: install
 	@echo "创建 git 别名..."
-	@git config --global alias.ai '!git-ai-commit'
+	@git config --global alias.ai '!$(BUILD_NAME)'
 	@echo "✅ 可以使用 git ai commit 命令了"
 
 clean:
 	go clean
-	rm -f git-ai-commit
+	rm -f $(BUILD_NAME)
 
 test:
 	go test ./...
