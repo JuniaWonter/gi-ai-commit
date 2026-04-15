@@ -106,7 +106,10 @@ func RunCommit(opts CommitOptions) error {
 	}, gitRoot)
 
 	payloads, err := diffProcessor.BuildPayloadsForFiles(selectedFiles)
-	if err != nil || len(payloads) == 0 {
+	if err != nil {
+		return fmt.Errorf("获取代码变更失败：%w", err)
+	}
+	if len(payloads) == 0 {
 		return fmt.Errorf("没有检测到任何代码变更")
 	}
 
