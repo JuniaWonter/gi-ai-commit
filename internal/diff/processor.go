@@ -99,6 +99,162 @@ func (p *DiffProcessor) BuildPayloads() ([]DiffPayload, error) {
 	return payloads, nil
 }
 
+func (p *DiffProcessor) BuildPayloadsForFiles(files []string) ([]DiffPayload, error) {
+	var fullDiff string
+	var err error
+
+	if len(files) == 0 {
+		fullDiff, err = p.getStagedDiff()
+	} else {
+		args := append([]string{"diff", "--cached", "--no-ext-diff", "--unified=1", "--"}, files...)
+		fullDiff, err = p.getCmdOutput("git", args...)
+	}
+
+	if err != nil {
+		return nil, err
+	}
+	if strings.TrimSpace(fullDiff) == "" {
+		return nil, nil
+	}
+
+	var payloads []DiffPayload
+
+	if len(fullDiff) <= p.cfg.MaxFullDiffBytes {
+		payloads = append(payloads, DiffPayload{
+			Mode:    "完整 diff",
+			Content: fullDiff,
+		})
+		return payloads, nil
+	}
+
+	compact := p.buildCompactDiffForFiles(fullDiff, files)
+	if compact != "" {
+		var stat, nameStatus string
+		if len(files) == 0 {
+			stat, _ = p.getCmdOutput("git", "diff", "--cached", "--stat")
+			nameStatus, _ = p.getCmdOutput("git", "diff", "--cached", "--name-status")
+		} else {
+			statArgs := append([]string{"diff", "--cached", "--stat", "--"}, files...)
+			stat, _ = p.getCmdOutput("git", statArgs...)
+			nameStatusArgs := append([]string{"diff", "--cached", "--name-status", "--"}, files...)
+			nameStatus, _ = p.getCmdOutput("git", nameStatusArgs...)
+		}
+		payloads = append(payloads, DiffPayload{
+			Mode: "压缩摘要",
+			Content: fmt.Sprintf(`以下代码变更过大，已自动压缩。请优先依据变更统计、文件列表和关键 patch 生成一条准确的 commit message。
+
+## 变更统计
+%s
+
+## 文件列表
+%s
+
+## 关键 Patch（已截断）
+%s
+`, strings.TrimSpace(stat), strings.TrimSpace(nameStatus), compact),
+		})
+		return payloads, nil
+	}
+
+	var stat, nameStatus string
+	if len(files) == 0 {
+		stat, _ = p.getCmdOutput("git", "diff", "--cached", "--stat")
+		nameStatus, _ = p.getCmdOutput("git", "diff", "--cached", "--name-status")
+	} else {
+		statArgs := append([]string{"diff", "--cached", "--stat", "--"}, files...)
+		stat, _ = p.getCmdOutput("git", statArgs...)
+		nameStatusArgs := append([]string{"diff", "--cached", "--name-status", "--"}, files...)
+		nameStatus, _ = p.getCmdOutput("git", nameStatusArgs...)
+	}
+	payloads = append(payloads, DiffPayload{
+		Mode: "文件级摘要",
+		Content: fmt.Sprintf(`以下代码变更过大，未附带完整 patch。请仅根据变更统计和文件列表生成一条概括性的 commit message。
+
+## 变更统计
+%s
+
+## 文件列表
+%s
+`, strings.TrimSpace(stat), strings.TrimSpace(nameStatus)),
+	})
+
+	return payloads, nil
+}
+
+func (p *DiffProcessor) buildCompactDiffForFiles(fullDiff string, files []string) string {
+	cfg := p.cfg
+	if cfg.MaxCompactDiffBytes <= 0 || cfg.MaxCompactDiffFiles <= 0 || cfg.MaxPerFileDiffBytes <= 0 {
+		return ""
+	}
+
+	parts := strings.Split(fullDiff, "diff --git ")
+	if len(parts) <= 1 {
+		return truncateText(fullDiff, cfg.MaxCompactDiffBytes)
+	}
+
+	var numStat string
+	if len(files) == 0 {
+		numStat, _ = p.getCmdOutput("git", "diff", "--cached", "--numstat")
+	} else {
+		numStatArgs := append([]string{"diff", "--cached", "--numstat", "--"}, files...)
+		numStat, _ = p.getCmdOutput("git", numStatArgs...)
+	}
+	scores := parseNumStat(numStat)
+
+	sections := make([]diffSection, 0, len(parts)-1)
+	totalFiles := 0
+	for _, part := range parts[1:] {
+		section := strings.TrimSpace("diff --git " + part)
+		if section == "" {
+			continue
+		}
+		path := extractDiffPath(section)
+		totalFiles++
+		sections = append(sections, diffSection{
+			Path:    path,
+			Content: section,
+			Score:   scores[path],
+		})
+	}
+	sortSections(sections)
+
+	var b strings.Builder
+	fileCount := 0
+	for _, section := range sections {
+		if fileCount >= cfg.MaxCompactDiffFiles || b.Len() >= cfg.MaxCompactDiffBytes {
+			continue
+		}
+
+		remaining := cfg.MaxCompactDiffBytes - b.Len()
+		if remaining <= len(truncatedDiffNotice) {
+			break
+		}
+
+		sectionText := truncateText(section.Content, cfg.MaxPerFileDiffBytes)
+		if len(sectionText) > remaining {
+			sectionText = truncateText(sectionText, remaining)
+		}
+		if strings.TrimSpace(sectionText) == "" {
+			continue
+		}
+
+		if b.Len() > 0 {
+			b.WriteString("\n\n")
+		}
+		b.WriteString(sectionText)
+		if len(section.Content) > len(sectionText) && !strings.HasSuffix(sectionText, truncatedDiffNotice) {
+			b.WriteString(truncatedFileNotice)
+		}
+		fileCount++
+	}
+
+	if totalFiles > fileCount {
+		fmt.Fprintf(&b, "\n\n[...其余 %d 个文件已省略...]", totalFiles-fileCount)
+	}
+
+	return strings.TrimSpace(b.String())
+}
+
 func (p *DiffProcessor) getStagedDiff() (string, error) {
 	return p.getCmdOutput("git", "diff", "--cached", "--no-ext-diff", "--unified=1")
 }
