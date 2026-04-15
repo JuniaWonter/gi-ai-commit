@@ -12,6 +12,7 @@ AI-powered Git commit message generator that uses DeepSeek API to automatically 
 - 🔄 Auto-update project description every 10 commits
 - 🎨 TUI interactive file selection
 - ⚡ Auto-confirm mode with `-y` flag
+- 🔄 Smart diff processing: three-level degradation strategy, auto-adapt to change size
 
 ## Installation
 
@@ -146,7 +147,13 @@ deepseek:
 
 commit:
   default_scope: ""      # Default scope
-  max_diff_lines: 500   # Max diff lines limit
+  max_diff_lines: 500    # Max diff lines limit
+
+diff_prompt:             # Three-level degradation strategy config
+  max_full_diff_bytes: 24000    # Max full diff bytes
+  max_compact_diff_bytes: 16000 # Max compact diff bytes
+  max_per_file_diff_bytes: 2200 # Max per-file diff bytes
+  max_compact_diff_files: 12    # Max compact diff files
 ```
 
 ## Environment Variables
