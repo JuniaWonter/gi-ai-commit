@@ -9,19 +9,19 @@ import (
 	openai "github.com/sashabaranov/go-openai"
 )
 
-type DeepSeekClient struct {
+type Client struct {
 	client *openai.Client
-	config DeepSeekConfig
+	config Config
 }
 
-type DeepSeekConfig struct {
+type Config struct {
 	APIKey  string
 	Model   string
 	BaseURL string
 	Timeout time.Duration
 }
 
-func NewDeepSeekClient(config DeepSeekConfig) (*DeepSeekClient, error) {
+func NewClient(config Config) (*Client, error) {
 	if config.APIKey == "" {
 		return nil, fmt.Errorf("API Key 未配置")
 	}
@@ -37,13 +37,13 @@ func NewDeepSeekClient(config DeepSeekConfig) (*DeepSeekClient, error) {
 		config.Timeout = 30 * time.Second
 	}
 
-	return &DeepSeekClient{
+	return &Client{
 		client: client,
 		config: config,
 	}, nil
 }
 
-func (c *DeepSeekClient) GenerateCommitMessage(diff, description string) (string, error) {
+func (c *Client) GenerateCommitMessage(diff, description string) (string, error) {
 	prompt := buildPrompt(diff, description)
 
 	req := openai.ChatCompletionRequest{
@@ -66,7 +66,7 @@ func (c *DeepSeekClient) GenerateCommitMessage(diff, description string) (string
 
 	resp, err := c.client.CreateChatCompletion(ctx, req)
 	if err != nil {
-		return "", fmt.Errorf("调用 DeepSeek API 失败：%w", err)
+		return "", fmt.Errorf("调用 AI API 失败：%w", err)
 	}
 
 	if len(resp.Choices) == 0 {
@@ -77,7 +77,7 @@ func (c *DeepSeekClient) GenerateCommitMessage(diff, description string) (string
 	return message, nil
 }
 
-func (c *DeepSeekClient) GenerateDescription(projectInfo, fileInfo, diff string) (string, error) {
+func (c *Client) GenerateDescription(projectInfo, fileInfo, diff string) (string, error) {
 	prompt := fmt.Sprintf(`请分析以下项目信息，生成一个简洁的项目描述（100-200 字）。
 
 项目信息：
@@ -116,7 +116,7 @@ func (c *DeepSeekClient) GenerateDescription(projectInfo, fileInfo, diff string)
 
 	resp, err := c.client.CreateChatCompletion(ctx, req)
 	if err != nil {
-		return "", fmt.Errorf("调用 DeepSeek API 失败：%w", err)
+		return "", fmt.Errorf("调用 AI API 失败：%w", err)
 	}
 
 	if len(resp.Choices) == 0 {

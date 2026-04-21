@@ -1,17 +1,30 @@
-# DeepSeek API 配置
-deepseek:
-  # API Key (必填)
-  # 从 https://platform.deepseek.com 获取
-  api_key: "sk-your-api-key-here"
+# AI API 配置
+ai:
+  # 默认使用的模型名称（必须在 models 中定义）
+  default_model: "deepseek"
   
-  # 模型名称
-  model: "deepseek-chat"
-  
-  # API 基础 URL
-  base_url: "https://api.deepseek.com"
-  
-  # 请求超时时间
-  timeout: "30s"
+  # 多个模型配置
+  models:
+    # DeepSeek 模型
+    deepseek:
+      api_key: "sk-your-deepseek-api-key"
+      model: "deepseek-chat"
+      base_url: "https://api.deepseek.com"
+      timeout: "30s"
+    
+    # 通义千问模型
+    qwen:
+      api_key: "sk-your-dashscope-api-key"
+      model: "qwen-plus"
+      base_url: "https://dashscope.aliyuncs.com/compatible-mode/v1"
+      timeout: "30s"
+    
+    # OpenAI 模型
+    openai:
+      api_key: "sk-your-openai-api-key"
+      model: "gpt-4"
+      base_url: "https://api.openai.com/v1"
+      timeout: "30s"
 
 # Commit 配置
 commit:

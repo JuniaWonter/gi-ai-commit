@@ -27,6 +27,7 @@ var (
 type CommitOptions struct {
 	AutoConfirm bool
 	DryRun      bool
+	Model       string
 }
 
 func RunCommit(opts CommitOptions) error {
@@ -71,7 +72,7 @@ func RunCommit(opts CommitOptions) error {
 
 	var diffContent string
 	var cfg *config.Config
-	var client *ai.DeepSeekClient
+	var client *ai.Client
 	var desc string
 
 	success := false
@@ -121,11 +122,19 @@ func RunCommit(opts CommitOptions) error {
 	}
 
 	fmt.Println("🤖 初始化 AI 客户端...")
-	client, err = ai.NewDeepSeekClient(ai.DeepSeekConfig{
-		APIKey:  cfg.DeepSeek.APIKey,
-		Model:   cfg.DeepSeek.Model,
-		BaseURL: cfg.DeepSeek.BaseURL,
-		Timeout: cfg.DeepSeek.GetTimeout(),
+	modelName := opts.Model
+	if modelName == "" {
+		modelName = cfg.AI.DefaultModel
+	}
+	modelCfg, err := cfg.GetModelConfig(modelName)
+	if err != nil {
+		return fmt.Errorf("获取模型配置失败：%w", err)
+	}
+	client, err = ai.NewClient(ai.Config{
+		APIKey:  modelCfg.APIKey,
+		Model:   modelCfg.Model,
+		BaseURL: modelCfg.BaseURL,
+		Timeout: modelCfg.GetTimeout(),
 	})
 	if err != nil {
 		return fmt.Errorf("初始化 AI 客户端失败：%w", err)
@@ -224,7 +233,7 @@ func selectFilesSimple(files []diff.FileChange) ([]string, bool) {
 	return selected, len(selected) > 0
 }
 
-func handleDescription(client *ai.DeepSeekClient, diffContent string, files []string, cfg *config.Config) (string, bool, error) {
+func handleDescription(client *ai.Client, diffContent string, files []string, cfg *config.Config) (string, bool, error) {
 	exists, err := description.Exists()
 	if err != nil {
 		return "", false, err

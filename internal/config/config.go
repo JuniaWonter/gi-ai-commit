@@ -10,12 +10,17 @@ import (
 )
 
 type Config struct {
-	DeepSeek   DeepSeekConfig   `yaml:"deepseek"`
+	AI         AIConfig         `yaml:"ai"`
 	Commit     CommitConfig     `yaml:"commit"`
 	DiffPrompt DiffPromptConfig `yaml:"diff_prompt"`
 }
 
-type DeepSeekConfig struct {
+type AIConfig struct {
+	DefaultModel string                   `yaml:"default_model"`
+	Models       map[string]ModelConfig   `yaml:"models"`
+}
+
+type ModelConfig struct {
 	APIKey  string `yaml:"api_key"`
 	Model   string `yaml:"model"`
 	BaseURL string `yaml:"base_url"`
@@ -35,10 +40,15 @@ type DiffPromptConfig struct {
 }
 
 var defaultConfig = Config{
-	DeepSeek: DeepSeekConfig{
-		Model:   "deepseek-chat",
-		BaseURL: "https://api.deepseek.com",
-		Timeout: "30s",
+	AI: AIConfig{
+		DefaultModel: "deepseek",
+		Models: map[string]ModelConfig{
+			"deepseek": {
+				Model:   "deepseek-chat",
+				BaseURL: "https://api.deepseek.com",
+				Timeout: "30s",
+			},
+		},
 	},
 	Commit: CommitConfig{
 		DefaultScope: "",
@@ -80,25 +90,69 @@ func Load() (*Config, error) {
 
 	overrideFromEnv(&config)
 
-	if config.DeepSeek.APIKey == "" {
-		return nil, fmt.Errorf("deepseek.api_key 未配置")
+	if config.AI.DefaultModel == "" {
+		return nil, fmt.Errorf("ai.default_model 未配置")
+	}
+
+	if config.AI.Models == nil || len(config.AI.Models) == 0 {
+		return nil, fmt.Errorf("ai.models 未配置")
+	}
+
+	if _, ok := config.AI.Models[config.AI.DefaultModel]; !ok {
+		return nil, fmt.Errorf("默认模型 %q 未在 ai.models 中配置", config.AI.DefaultModel)
 	}
 
 	return &config, nil
 }
 
 func overrideFromEnv(cfg *Config) {
-	if apiKey := os.Getenv("DEEPSEEK_API_KEY"); apiKey != "" {
-		cfg.DeepSeek.APIKey = apiKey
+	if apiKey := os.Getenv("AI_API_KEY"); apiKey != "" {
+		if cfg.AI.Models == nil {
+			cfg.AI.Models = make(map[string]ModelConfig)
+		}
+		defaultModel := cfg.AI.DefaultModel
+		if defaultModel == "" {
+			defaultModel = "deepseek"
+		}
+		m := cfg.AI.Models[defaultModel]
+		m.APIKey = apiKey
+		cfg.AI.Models[defaultModel] = m
 	}
-	if model := os.Getenv("DEEPSEEK_MODEL"); model != "" {
-		cfg.DeepSeek.Model = model
+	if model := os.Getenv("AI_MODEL"); model != "" {
+		if cfg.AI.Models == nil {
+			cfg.AI.Models = make(map[string]ModelConfig)
+		}
+		defaultModel := cfg.AI.DefaultModel
+		if defaultModel == "" {
+			defaultModel = "deepseek"
+		}
+		m := cfg.AI.Models[defaultModel]
+		m.Model = model
+		cfg.AI.Models[defaultModel] = m
 	}
-	if baseURL := os.Getenv("DEEPSEEK_BASE_URL"); baseURL != "" {
-		cfg.DeepSeek.BaseURL = baseURL
+	if baseURL := os.Getenv("AI_BASE_URL"); baseURL != "" {
+		if cfg.AI.Models == nil {
+			cfg.AI.Models = make(map[string]ModelConfig)
+		}
+		defaultModel := cfg.AI.DefaultModel
+		if defaultModel == "" {
+			defaultModel = "deepseek"
+		}
+		m := cfg.AI.Models[defaultModel]
+		m.BaseURL = baseURL
+		cfg.AI.Models[defaultModel] = m
 	}
-	if timeout := os.Getenv("DEEPSEEK_TIMEOUT"); timeout != "" {
-		cfg.DeepSeek.Timeout = timeout
+	if timeout := os.Getenv("AI_TIMEOUT"); timeout != "" {
+		if cfg.AI.Models == nil {
+			cfg.AI.Models = make(map[string]ModelConfig)
+		}
+		defaultModel := cfg.AI.DefaultModel
+		if defaultModel == "" {
+			defaultModel = "deepseek"
+		}
+		m := cfg.AI.Models[defaultModel]
+		m.Timeout = timeout
+		cfg.AI.Models[defaultModel] = m
 	}
 }
 
@@ -138,11 +192,28 @@ func Save(config *Config) error {
 	return nil
 }
 
-func (c *DeepSeekConfig) GetTimeout() time.Duration {
-	if c.Timeout == "" {
+func (c *Config) GetModelConfig(modelName string) (*ModelConfig, error) {
+	if modelName == "" {
+		modelName = c.AI.DefaultModel
+	}
+
+	m, ok := c.AI.Models[modelName]
+	if !ok {
+		return nil, fmt.Errorf("模型 %q 未配置，请在 ai.models 中添加", modelName)
+	}
+
+	if m.APIKey == "" {
+		return nil, fmt.Errorf("模型 %q 的 api_key 未配置", modelName)
+	}
+
+	return &m, nil
+}
+
+func (m *ModelConfig) GetTimeout() time.Duration {
+	if m.Timeout == "" {
 		return 30 * time.Second
 	}
-	d, err := time.ParseDuration(c.Timeout)
+	d, err := time.ParseDuration(m.Timeout)
 	if err != nil {
 		return 30 * time.Second
 	}
