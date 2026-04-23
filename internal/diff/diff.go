@@ -132,10 +132,7 @@ func GetFileDiffFull(filePath string, ignoreWS bool) (string, string, error) {
 	argsUnstaged = append(argsUnstaged, "--", filePath)
 	cmd = exec.Command("git", argsUnstaged...)
 	cmd.Dir = gitRoot
-	unstagedOutput, err := cmd.Output()
-	if err != nil {
-		return "", "", fmt.Errorf("获取文件 diff 失败：%w", err)
-	}
+	unstagedOutput, _ := cmd.Output()
 
 	raw := strings.TrimSpace(string(cachedOutput)) + "\n" + strings.TrimSpace(string(unstagedOutput))
 	raw = strings.TrimSpace(raw)
