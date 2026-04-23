@@ -287,11 +287,27 @@ func (m *CommitFlowModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		return m, cmd
 
 	case phaseStaging:
+		switch msg := msg.(type) {
+		case tea.KeyMsg:
+			if msg.Type == tea.KeyCtrlC {
+				m.phase = phaseError
+				m.errorMsg = "用户取消操作"
+				return m, tea.Quit
+			}
+		}
 		var cmd tea.Cmd
 		m.spinner, cmd = m.spinner.Update(msg)
 		return m, tea.Batch(cmd, m.spinner.Tick)
 
 	case phaseGenerating:
+		switch msg := msg.(type) {
+		case tea.KeyMsg:
+			if msg.Type == tea.KeyCtrlC {
+				m.phase = phaseError
+				m.errorMsg = "用户取消操作"
+				return m, tea.Quit
+			}
+		}
 		var cmd tea.Cmd
 		m.spinner, cmd = m.spinner.Update(msg)
 		return m, tea.Batch(cmd, m.spinner.Tick)
@@ -316,6 +332,14 @@ func (m *CommitFlowModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		}
 
 	case phaseExecuting:
+		switch msg := msg.(type) {
+		case tea.KeyMsg:
+			if msg.Type == tea.KeyCtrlC {
+				m.phase = phaseError
+				m.errorMsg = "用户取消操作"
+				return m, tea.Quit
+			}
+		}
 		var cmd tea.Cmd
 		m.spinner, cmd = m.spinner.Update(msg)
 		return m, tea.Batch(cmd, m.spinner.Tick)
