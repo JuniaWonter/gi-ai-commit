@@ -194,7 +194,7 @@ func (m *CommitFlowModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 	case stageDoneMsg:
 		if msg.success {
 			m.phase = phaseGenerating
-			return m, m.startGenerateCmd()
+			return m, tea.Batch(m.spinner.Tick, m.startGenerateCmd())
 		}
 		m.phase = phaseError
 		m.errorMsg = fmt.Sprintf("暂存文件失败：%v", msg.err)
@@ -223,7 +223,7 @@ func (m *CommitFlowModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			}
 			m.selectedFiles = selected
 			m.phase = phaseStaging
-			return m, tea.Batch(cmd, m.startStageCmd(selected))
+			return m, tea.Batch(cmd, m.spinner.Tick, m.startStageCmd(selected))
 		}
 		return m, cmd
 
@@ -242,19 +242,19 @@ func (m *CommitFlowModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			}
 			m.selectedFiles = selected
 			m.phase = phaseStaging
-			return m, tea.Batch(cmd, m.startStageCmd(selected))
+			return m, tea.Batch(cmd, m.spinner.Tick, m.startStageCmd(selected))
 		}
 		return m, cmd
 
 	case phaseStaging:
 		var cmd tea.Cmd
 		m.spinner, cmd = m.spinner.Update(msg)
-		return m, cmd
+		return m, tea.Batch(cmd, m.spinner.Tick)
 
 	case phaseGenerating:
 		var cmd tea.Cmd
 		m.spinner, cmd = m.spinner.Update(msg)
-		return m, cmd
+		return m, tea.Batch(cmd, m.spinner.Tick)
 
 	case phaseConfirm:
 		switch msg := msg.(type) {
