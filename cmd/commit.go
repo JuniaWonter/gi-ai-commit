@@ -1,12 +1,8 @@
 package cmd
 
 import (
-	"bufio"
-	"errors"
 	"fmt"
-	"os"
 	"os/exec"
-	"strconv"
 	"strings"
 
 	"github.com/oliver/git-ai-commit/internal/ai"
@@ -18,11 +14,6 @@ import (
 	"github.com/oliver/git-ai-commit/internal/loading"
 	"github.com/oliver/git-ai-commit/internal/project"
 	"github.com/oliver/git-ai-commit/tui"
-)
-
-var (
-	errUserCancelled = errors.New("用户取消提交")
-	ErrUserCancelled = errUserCancelled
 )
 
 type CommitOptions struct {
@@ -47,19 +38,9 @@ func RunCommit(opts CommitOptions) error {
 		return fmt.Errorf("没有变更的文件")
 	}
 
-	var selectedFiles []string
-
-	if opts.DryRun {
-		selectedFiles, _ = selectFilesSimple(files)
-	} else {
-		selectedFiles, _ = tui.SelectFiles(files)
-		if err != nil {
-			if strings.Contains(err.Error(), "no such device") || strings.Contains(err.Error(), "TTY") {
-				selectedFiles, _ = selectFilesSimple(files)
-			} else {
-				return fmt.Errorf("选择文件失败：%w", err)
-			}
-		}
+	selectedFiles, err := tui.SelectFiles(files)
+	if err != nil {
+		return fmt.Errorf("选择文件失败：%w", err)
 	}
 
 	if len(selectedFiles) == 0 {
@@ -70,11 +51,6 @@ func RunCommit(opts CommitOptions) error {
 	if err := diff.StageFiles(selectedFiles); err != nil {
 		return err
 	}
-
-	var diffContent string
-	var cfg *config.Config
-	var client *ai.Client
-	var desc string
 
 	success := false
 	defer func() {
@@ -89,7 +65,7 @@ func RunCommit(opts CommitOptions) error {
 	}()
 
 	fmt.Println("⚙️  加载配置...")
-	cfg, err = config.Load()
+	cfg, err := config.Load()
 	if err != nil {
 		return fmt.Errorf("加载配置失败：%w", err)
 	}
@@ -115,7 +91,7 @@ func RunCommit(opts CommitOptions) error {
 		return fmt.Errorf("没有检测到任何代码变更")
 	}
 
-	diffContent = payloads[0].Content
+	diffContent := payloads[0].Content
 	diffMode := payloads[0].Mode
 
 	if strings.TrimSpace(diffContent) == "" {
@@ -131,7 +107,7 @@ func RunCommit(opts CommitOptions) error {
 	if err != nil {
 		return fmt.Errorf("获取模型配置失败：%w", err)
 	}
-	client, err = ai.NewClient(ai.Config{
+	client, err := ai.NewClient(ai.Config{
 		APIKey:  modelCfg.APIKey,
 		Model:   modelCfg.Model,
 		BaseURL: modelCfg.BaseURL,
@@ -142,17 +118,17 @@ func RunCommit(opts CommitOptions) error {
 	}
 
 	fmt.Println("📋 检查仓库描述...")
-	desc, _, err = handleDescription(client, diffContent, selectedFiles, cfg)
+	desc, _, err := handleDescription(client, diffContent, selectedFiles, cfg)
 	if err != nil {
 		return fmt.Errorf("处理描述失败：%w", err)
 	}
 
-	fmt.Println("🤖 生成 commit message...")
+	conventionInfo := git.DetectConventions()
+
+	fmt.Println("🤖 生成并提交 commit...")
 	if diffMode != "完整 diff" {
 		fmt.Printf("ℹ️  变更较大，已使用 %s 模式\n", diffMode)
 	}
-
-	conventionInfo := git.DetectConventions()
 
 	spinner := loading.New("正在生成并提交 commit...")
 	spinner.Start()
@@ -161,7 +137,7 @@ func RunCommit(opts CommitOptions) error {
 
 	if err != nil {
 		for _, tr := range toolResults {
-			fmt.Printf("  工具 %s → %s\n", tr.ToolName, truncateResult(tr.Result, 200))
+			fmt.Printf("  工具 %s → %s\n", tr.ToolName, truncateString(tr.Result, 200))
 		}
 		return fmt.Errorf("提交失败：%w", err)
 	}
@@ -172,42 +148,6 @@ func RunCommit(opts CommitOptions) error {
 		fmt.Println(line)
 	}
 	fmt.Println(strings.Repeat("─", 50))
-
-	if !opts.AutoConfirm && !opts.DryRun {
-		fmt.Print("\n确认提交结果？(Y/n/e=编辑): ")
-		reader := bufio.NewReader(os.Stdin)
-		input, err := reader.ReadString('\n')
-		if err != nil {
-			return fmt.Errorf("读取输入失败：%w", err)
-		}
-
-		input = strings.TrimSpace(strings.ToLower(input))
-		if input == "n" || input == "no" {
-			fmt.Println("🔄 撤销提交，恢复暂存状态...")
-			resetResult := git.ResetLastCommit()
-			if !resetResult.Success {
-				return fmt.Errorf("撤销提交失败：%s", resetResult.Stderr)
-			}
-			fmt.Println("✅ 已撤销提交，文件仍处于暂存状态")
-			return errUserCancelled
-		}
-		if input == "e" || input == "edit" {
-			newMsg, err := tui.EditCommitMessage(commitMessage)
-			if err != nil {
-				return fmt.Errorf("编辑失败：%w", err)
-			}
-			if newMsg == "" {
-				fmt.Println("未修改，保留原提交")
-			} else {
-				amendResult := git.CommitAmend(newMsg)
-				if !amendResult.Success {
-					return fmt.Errorf("修改提交失败：%s", amendResult.Stderr)
-				}
-				commitMessage = newMsg
-				fmt.Println("✅ commit message 已更新")
-			}
-		}
-	}
 
 	if opts.DryRun {
 		fmt.Println("🔍 Dry-run 模式，不执行提交")
@@ -228,35 +168,6 @@ func RunCommit(opts CommitOptions) error {
 func isGitRepo() bool {
 	cmd := exec.Command("git", "rev-parse", "--git-dir")
 	return cmd.Run() == nil
-}
-
-func selectFilesSimple(files []diff.FileChange) ([]string, bool) {
-	fmt.Println("📝 选择要提交的文件:")
-	for i, f := range files {
-		fmt.Printf("  %d. %s\n", i+1, f.Path)
-	}
-	fmt.Print("输入要提交的文件编号（多个用逗号分隔，直接回车选择全部）: ")
-	reader := bufio.NewReader(os.Stdin)
-	input, _ := reader.ReadString('\n')
-	input = strings.TrimSpace(input)
-
-	if input == "" {
-		var all []string
-		for _, f := range files {
-			all = append(all, f.Path)
-		}
-		return all, true
-	}
-
-	var selected []string
-	parts := strings.Split(input, ",")
-	for _, p := range parts {
-		p = strings.TrimSpace(p)
-		if idx, err := strconv.Atoi(p); err == nil && idx > 0 && idx <= len(files) {
-			selected = append(selected, files[idx-1].Path)
-		}
-	}
-	return selected, len(selected) > 0
 }
 
 func handleDescription(client *ai.Client, diffContent string, files []string, cfg *config.Config) (string, bool, error) {
@@ -336,18 +247,13 @@ func handleDescription(client *ai.Client, diffContent string, files []string, cf
 	return desc, true, nil
 }
 
-func truncateResult(s string, maxLen int) string {
+var ErrUserCancelled = fmt.Errorf("用户取消提交")
+
+func truncateString(s string, maxLen int) string {
 	if len(s) <= maxLen {
 		return s
 	}
 	return s[:maxLen] + "..."
-}
-
-func executeCommit(message string) error {
-	cmd := exec.Command("git", "commit", "-m", message)
-	cmd.Stdout = os.Stdout
-	cmd.Stderr = os.Stderr
-	return cmd.Run()
 }
 
 func getProjectRoot() (string, error) {
