@@ -53,10 +53,27 @@ func GetChangedFiles() ([]FileChange, error) {
 		path := strings.TrimSpace(line[2:])
 		staged := status[0] != ' '
 
-		files = append(files, FileChange{
-			Path:   path,
-			Staged: staged,
-		})
+		if strings.HasSuffix(path, "/") {
+			expanded, err := expandUntrackedDir(gitRoot, path)
+			if err != nil || len(expanded) == 0 {
+				files = append(files, FileChange{
+					Path:   path,
+					Staged: staged,
+				})
+			} else {
+				for _, fp := range expanded {
+					files = append(files, FileChange{
+						Path:   fp,
+						Staged: false,
+					})
+				}
+			}
+		} else {
+			files = append(files, FileChange{
+				Path:   path,
+				Staged: staged,
+			})
+		}
 	}
 
 	if len(files) == 0 {
@@ -84,29 +101,56 @@ func GetChangedFiles() ([]FileChange, error) {
 }
 
 func GetFileDiff(filePath string) (string, error) {
+	content, _, err := GetFileDiffFull(filePath, false)
+	return content, err
+}
+
+func GetFileDiffFull(filePath string, ignoreWS bool) (string, string, error) {
 	gitRoot, err := getGitRoot()
 	if err != nil {
-		return "", fmt.Errorf("获取 git 根目录失败：%w", err)
+		return "", "", fmt.Errorf("获取 git 根目录失败：%w", err)
 	}
 
-	cmd := exec.Command("git", "diff", "--cached", "--", filePath)
+	wsFlag := ""
+	if ignoreWS {
+		wsFlag = "-w"
+	}
+
+	argsCached := []string{"diff", "--cached"}
+	if wsFlag != "" {
+		argsCached = append(argsCached, wsFlag)
+	}
+	argsCached = append(argsCached, "--", filePath)
+	cmd := exec.Command("git", argsCached...)
 	cmd.Dir = gitRoot
 	cachedOutput, _ := cmd.Output()
 
-	cmd = exec.Command("git", "diff", "--", filePath)
+	argsUnstaged := []string{"diff"}
+	if wsFlag != "" {
+		argsUnstaged = append(argsUnstaged, wsFlag)
+	}
+	argsUnstaged = append(argsUnstaged, "--", filePath)
+	cmd = exec.Command("git", argsUnstaged...)
 	cmd.Dir = gitRoot
 	unstagedOutput, err := cmd.Output()
 	if err != nil {
-		return "", fmt.Errorf("获取文件 diff 失败：%w", err)
+		return "", "", fmt.Errorf("获取文件 diff 失败：%w", err)
 	}
 
-	diff := strings.TrimSpace(string(cachedOutput)) + "\n" + strings.TrimSpace(string(unstagedOutput))
-	diff = strings.TrimSpace(diff)
-	if diff == "" {
-		return "", fmt.Errorf("文件 %s 没有变更", filePath)
+	raw := strings.TrimSpace(string(cachedOutput)) + "\n" + strings.TrimSpace(string(unstagedOutput))
+	raw = strings.TrimSpace(raw)
+	if raw == "" {
+		if isUntrackedFile(gitRoot, filePath) {
+			untrackedDiff, err := getUntrackedDiff(gitRoot, filePath, ignoreWS)
+			if err != nil {
+				return "", "", err
+			}
+			return untrackedDiff, untrackedDiff, nil
+		}
+		return "", "", fmt.Errorf("文件 %s 没有变更", filePath)
 	}
 
-	return diff, nil
+	return raw, raw, nil
 }
 
 func GetStagedDiff() (string, error) {
@@ -158,6 +202,58 @@ func StageFiles(paths []string) error {
 		}
 	}
 	return nil
+}
+
+func expandUntrackedDir(gitRoot, dirPath string) ([]string, error) {
+	dirPath = strings.TrimSuffix(dirPath, "/")
+	cmd := exec.Command("git", "ls-files", "--others", "--exclude-standard", dirPath)
+	cmd.Dir = gitRoot
+	output, err := cmd.Output()
+	if err != nil {
+		return nil, err
+	}
+	lines := strings.Split(strings.TrimSpace(string(output)), "\n")
+	var result []string
+	for _, line := range lines {
+		line = strings.TrimSpace(line)
+		if line != "" {
+			result = append(result, line)
+		}
+	}
+	return result, nil
+}
+
+func isUntrackedFile(gitRoot, filePath string) bool {
+	cmd := exec.Command("git", "ls-files", "--", filePath)
+	cmd.Dir = gitRoot
+	output, _ := cmd.Output()
+	return strings.TrimSpace(string(output)) == ""
+}
+
+func getUntrackedDiff(gitRoot, filePath string, ignoreWS bool) (string, error) {
+	args := []string{"diff", "--no-index"}
+	if ignoreWS {
+		args = append(args, "-w")
+	}
+	args = append(args, "/dev/null", filePath)
+	cmd := exec.Command("git", args...)
+	cmd.Dir = gitRoot
+	output, _ := cmd.Output()
+	diff := strings.TrimSpace(string(output))
+	if diff == "" {
+		return "", fmt.Errorf("文件 %s 没有变更", filePath)
+	}
+	lines := strings.Split(diff, "\n")
+	for i, line := range lines {
+		if strings.HasPrefix(line, "diff --git") {
+			lines[i] = "diff --git a/" + filePath + " b/" + filePath
+		} else if strings.HasPrefix(line, "--- a/") {
+			lines[i] = "--- /dev/null"
+		} else if strings.HasPrefix(line, "+++ b/") {
+			lines[i] = "+++ b/" + filePath
+		}
+	}
+	return strings.Join(lines, "\n"), nil
 }
 
 func getGitRoot() (string, error) {

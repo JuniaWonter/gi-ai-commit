@@ -14,6 +14,7 @@ import (
 	"github.com/oliver/git-ai-commit/internal/counter"
 	"github.com/oliver/git-ai-commit/internal/description"
 	"github.com/oliver/git-ai-commit/internal/diff"
+	"github.com/oliver/git-ai-commit/internal/git"
 	"github.com/oliver/git-ai-commit/internal/loading"
 	"github.com/oliver/git-ai-commit/internal/project"
 	"github.com/oliver/git-ai-commit/tui"
@@ -151,21 +152,27 @@ func RunCommit(opts CommitOptions) error {
 		fmt.Printf("ℹ️  变更较大，已使用 %s 模式\n", diffMode)
 	}
 
-	spinner := loading.New("正在生成 commit message...")
+	conventionInfo := git.DetectConventions()
+
+	spinner := loading.New("正在生成并提交 commit...")
 	spinner.Start()
-	commitMessage, err := client.GenerateCommitMessage(diffContent, desc)
-	spinner.Stop("生成完成")
+	commitMessage, toolResults, err := client.CommitWithRetry(diffContent, desc, conventionInfo, 3)
+	spinner.Stop("处理完成")
+
 	if err != nil {
-		return fmt.Errorf("生成 commit message 失败：%w", err)
+		for _, tr := range toolResults {
+			fmt.Printf("  工具 %s → %s\n", tr.ToolName, truncateResult(tr.Result, 200))
+		}
+		return fmt.Errorf("提交失败：%w", err)
 	}
 
-	fmt.Println("\n📝 生成的 commit message:")
+	fmt.Println("\n📝 最终 commit message:")
 	fmt.Println(strings.Repeat("─", 50))
 	fmt.Println(commitMessage)
 	fmt.Println(strings.Repeat("─", 50))
 
-	if !opts.AutoConfirm {
-		fmt.Print("\n确认提交？(Y/n): ")
+	if !opts.AutoConfirm && !opts.DryRun {
+		fmt.Print("\n确认提交结果？(Y/n/e=编辑): ")
 		reader := bufio.NewReader(os.Stdin)
 		input, err := reader.ReadString('\n')
 		if err != nil {
@@ -174,7 +181,23 @@ func RunCommit(opts CommitOptions) error {
 
 		input = strings.TrimSpace(strings.ToLower(input))
 		if input == "n" || input == "no" {
+			git.CommitAmend("chore: 回滚 AI 提交")
 			return errUserCancelled
+		}
+		if input == "e" || input == "edit" {
+			fmt.Print("输入新的 commit message: ")
+			newMsg, err := reader.ReadString('\n')
+			if err != nil {
+				return fmt.Errorf("读取输入失败：%w", err)
+			}
+			newMsg = strings.TrimSpace(newMsg)
+			if newMsg != "" {
+				amendResult := git.CommitAmend(newMsg)
+				if !amendResult.Success {
+					return fmt.Errorf("修改提交失败：%s", amendResult.Stderr)
+				}
+				commitMessage = newMsg
+			}
 		}
 	}
 
@@ -182,11 +205,6 @@ func RunCommit(opts CommitOptions) error {
 		fmt.Println("🔍 Dry-run 模式，不执行提交")
 		success = true
 		return nil
-	}
-
-	fmt.Println("✅ 提交中...")
-	if err := executeCommit(commitMessage); err != nil {
-		return fmt.Errorf("执行提交失败：%w", err)
 	}
 
 	fmt.Println("📊 更新计数...")
@@ -308,6 +326,13 @@ func handleDescription(client *ai.Client, diffContent string, files []string, cf
 	}
 
 	return desc, true, nil
+}
+
+func truncateResult(s string, maxLen int) string {
+	if len(s) <= maxLen {
+		return s
+	}
+	return s[:maxLen] + "..."
 }
 
 func executeCommit(message string) error {
