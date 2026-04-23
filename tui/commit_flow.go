@@ -1,9 +1,13 @@
 package tui
 
 import (
+	"encoding/json"
 	"fmt"
+	"os"
 	"os/exec"
+	"os/signal"
 	"strings"
+	"syscall"
 
 	"github.com/charmbracelet/bubbles/spinner"
 	"github.com/charmbracelet/bubbles/textarea"
@@ -22,28 +26,19 @@ const (
 	phaseDiffView
 	phaseStaging
 	phaseGenerating
-	phaseConfirm
-	phaseEdit
-	phaseCommitting
+	phaseAuthorize
+	phaseExecuting
 	phaseResult
 	phaseError
 )
 
-type generateResultMsg struct {
-	commitMessage string
-	toolResults   []ai.ToolCallResult
-	err           error
-}
-
-type commitDoneMsg struct {
-	success bool
-	hash    string
+type aiResponseMsg struct {
+	pending []ai.PendingToolCall
 	err     error
 }
 
-type amendDoneMsg struct {
-	success bool
-	hash    string
+type execDoneMsg struct {
+	pending []ai.PendingToolCall
 	err     error
 }
 
@@ -74,14 +69,31 @@ var (
 		BorderForeground(lipgloss.Color("63")).
 		Padding(1, 2)
 
+	toastStyle = lipgloss.NewStyle().
+			Border(lipgloss.RoundedBorder()).
+			BorderForeground(lipgloss.Color("220")).
+			Padding(1, 2).
+			Background(lipgloss.Color("236"))
+
+	toastTitleStyle = lipgloss.NewStyle().
+			Bold(true).
+			Foreground(lipgloss.Color("220"))
+
+	toastToolNameStyle = lipgloss.NewStyle().
+				Bold(true).
+				Foreground(lipgloss.Color("6"))
+
+	toastArgsStyle = lipgloss.NewStyle().
+			Foreground(lipgloss.Color("241"))
+
 	errorStyle = lipgloss.NewStyle().
-		Foreground(lipgloss.Color("1"))
+			Foreground(lipgloss.Color("1"))
 
 	successStyle = lipgloss.NewStyle().
-		Foreground(lipgloss.Color("2"))
+			Foreground(lipgloss.Color("2"))
 
 	spinnerStyle = lipgloss.NewStyle().
-		Foreground(lipgloss.Color("63"))
+			Foreground(lipgloss.Color("63"))
 )
 
 type CommitFlowOptions struct {
@@ -94,21 +106,22 @@ type CommitFlowOptions struct {
 }
 
 type CommitFlowModel struct {
-	phase          phase
-	opts           CommitFlowOptions
-	files          []diff.FileChange
-	fileSelector   *FileSelector
-	viewport       viewport.Model
-	textarea       textarea.Model
-	spinner        spinner.Model
-	termWidth      int
-	termHeight     int
-	ready          bool
+	phase        phase
+	opts         CommitFlowOptions
+	files        []diff.FileChange
+	fileSelector *FileSelector
+	viewport     viewport.Model
+	textarea     textarea.Model
+	spinner      spinner.Model
+	termWidth    int
+	termHeight   int
+	ready        bool
 
+	session        *ai.CommitSession
+	pendingCalls   []ai.PendingToolCall
 	commitMessage  string
-	toolResults    []ai.ToolCallResult
-	errorMsg       string
 	commitHash     string
+	errorMsg       string
 	selectedFiles  []string
 	stagedFiles    []string
 	originalStaged []string
@@ -137,7 +150,16 @@ func NewCommitFlowModel(files []diff.FileChange, opts CommitFlowOptions) *Commit
 }
 
 func (m *CommitFlowModel) Init() tea.Cmd {
-	return tea.Batch(m.fileSelector.Init(), m.spinner.Tick)
+	sigChan := make(chan os.Signal, 1)
+	signal.Notify(sigChan, syscall.SIGINT, syscall.SIGTERM)
+	return tea.Batch(m.fileSelector.Init(), m.spinner.Tick, func() tea.Msg {
+		sig := <-sigChan
+		return signalMsg{sig: sig}
+	})
+}
+
+type signalMsg struct {
+	sig os.Signal
 }
 
 func (m *CommitFlowModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
@@ -153,42 +175,60 @@ func (m *CommitFlowModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			m.viewport.Width = msg.Width
 			m.viewport.Height = msg.Height - 4
 		}
+		if m.phase == phaseSelectFiles || m.phase == phaseDiffView {
+			fsModel, cmd := m.fileSelector.Update(msg)
+			m.fileSelector = fsModel.(*FileSelector)
+			return m, cmd
+		}
 		return m, nil
 
-	case generateResultMsg:
+	case signalMsg:
+		m.phase = phaseError
+		m.errorMsg = "用户取消操作"
+		return m, tea.Quit
+
+	case aiResponseMsg:
 		if msg.err != nil {
 			m.phase = phaseError
 			m.errorMsg = msg.err.Error()
-			m.toolResults = msg.toolResults
 			return m, nil
 		}
-		m.phase = phaseConfirm
-		m.commitMessage = msg.commitMessage
-		m.toolResults = msg.toolResults
-		if m.opts.AutoConfirm {
-			m.phase = phaseCommitting
-			return m, m.startCommitCmd()
+		if msg.pending == nil || len(msg.pending) == 0 {
+			result := m.session.GetResult()
+			if result.Success {
+				m.phase = phaseResult
+				m.commitMessage = result.CommitMsg
+				m.commitHash = extractHash(result.ToolResults)
+			} else {
+				m.phase = phaseError
+				m.errorMsg = result.Error.Error()
+			}
+			return m, nil
 		}
+		m.pendingCalls = msg.pending
+		m.phase = phaseAuthorize
 		return m, nil
 
-	case commitDoneMsg:
-		if msg.success {
-			m.phase = phaseResult
-			m.commitHash = msg.hash
+	case execDoneMsg:
+		if msg.err != nil {
+			m.phase = phaseError
+			m.errorMsg = msg.err.Error()
 			return m, nil
 		}
-		m.phase = phaseError
-		m.errorMsg = msg.err.Error()
-		return m, nil
-
-	case amendDoneMsg:
-		if msg.success {
-			m.commitHash = msg.hash
-			m.phase = phaseResult
+		if msg.pending == nil || len(msg.pending) == 0 {
+			result := m.session.GetResult()
+			if result.Success {
+				m.phase = phaseResult
+				m.commitMessage = result.CommitMsg
+				m.commitHash = extractHash(result.ToolResults)
+			} else {
+				m.phase = phaseError
+				m.errorMsg = result.Error.Error()
+			}
 			return m, nil
 		}
-		m.phase = phaseError
-		m.errorMsg = msg.err.Error()
+		m.pendingCalls = msg.pending
+		m.phase = phaseAuthorize
 		return m, nil
 
 	case stageDoneMsg:
@@ -256,47 +296,29 @@ func (m *CommitFlowModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		m.spinner, cmd = m.spinner.Update(msg)
 		return m, tea.Batch(cmd, m.spinner.Tick)
 
-	case phaseConfirm:
+	case phaseAuthorize:
 		switch msg := msg.(type) {
 		case tea.KeyMsg:
-			switch msg.String() {
-			case "y", "enter":
-				m.phase = phaseResult
+			s := msg.String()
+			switch s {
+			case "y", "Y", "enter":
+				m.phase = phaseExecuting
+				return m, m.executeAuthorizedCmd()
+			case "n", "N":
+				m.phase = phaseError
+				m.errorMsg = "用户拒绝工具调用，已取消"
 				return m, nil
-			case "n":
-				m.phase = phaseCommitting
-				return m, m.startResetCmd()
-			case "e":
-				m.phase = phaseEdit
-				m.textarea.SetValue(m.commitMessage)
-				m.textarea.Focus()
-				return m, textarea.Blink
-			case "ctrl+c", "q":
+			case "ctrl+c":
 				m.phase = phaseError
 				m.errorMsg = "用户取消操作"
-				return m, tea.Quit
+				return m, nil
 			}
 		}
 
-	case phaseEdit:
-		switch msg := msg.(type) {
-		case tea.KeyMsg:
-			switch msg.Type {
-			case tea.KeyCtrlC, tea.KeyEsc:
-				m.phase = phaseConfirm
-				return m, nil
-			case tea.KeyCtrlS:
-				newMsg := strings.TrimSpace(m.textarea.Value())
-				if newMsg != "" {
-					m.commitMessage = newMsg
-				}
-				m.phase = phaseConfirm
-				return m, nil
-			}
-		}
+	case phaseExecuting:
 		var cmd tea.Cmd
-		m.textarea, cmd = m.textarea.Update(msg)
-		return m, cmd
+		m.spinner, cmd = m.spinner.Update(msg)
+		return m, tea.Batch(cmd, m.spinner.Tick)
 
 	case phaseResult, phaseError:
 		switch msg.(type) {
@@ -341,46 +363,26 @@ func getStagedFiles() []string {
 func (m *CommitFlowModel) startGenerateCmd() tea.Cmd {
 	return func() tea.Msg {
 		conventionInfo := git.DetectConventions()
-		commitMessage, toolResults, err := m.opts.Client.CommitWithRetry(
+		sess, pending, err := m.opts.Client.StartCommitSession(
 			m.opts.DiffContent, m.opts.Desc, conventionInfo, 3,
 		)
-		return generateResultMsg{
-			commitMessage: commitMessage,
-			toolResults:   toolResults,
-			err:           err,
+		if err != nil {
+			return aiResponseMsg{err: err}
 		}
+		m.session = sess
+		return aiResponseMsg{pending: pending}
 	}
 }
 
-func (m *CommitFlowModel) startCommitCmd() tea.Cmd {
+func (m *CommitFlowModel) executeAuthorizedCmd() tea.Cmd {
 	return func() tea.Msg {
-		if m.opts.DryRun {
-			return commitDoneMsg{success: true}
+		authorized := make([]bool, len(m.pendingCalls))
+		for i := range authorized {
+			authorized[i] = true
 		}
-		result := git.Commit(m.commitMessage)
-		if result.Success {
-			return commitDoneMsg{success: true, hash: result.Hash}
-		}
-		return commitDoneMsg{success: false, err: fmt.Errorf("commit failed: %s", result.Stderr)}
+		pending, err := m.session.ExecuteAndResume(authorized)
+		return execDoneMsg{pending: pending, err: err}
 	}
-}
-
-func (m *CommitFlowModel) startResetCmd() tea.Cmd {
-	return func() tea.Msg {
-		if m.commitHash != "" {
-			result := git.ResetLastCommit()
-			if !result.Success {
-				return resetDoneMsg{success: false, err: fmt.Errorf("reset failed: %s", result.Error)}
-			}
-		}
-		if len(m.originalStaged) > 0 {
-			diff.StageFiles(m.originalStaged)
-		}
-		return resetDoneMsg{success: true}
-	}
-}
-
-func resetFiles(files []string) {
 }
 
 func (m *CommitFlowModel) View() string {
@@ -400,45 +402,16 @@ func (m *CommitFlowModel) View() string {
 			header = phaseHeaderStyle.Width(m.termWidth).Render(fmt.Sprintf("  生成 commit message...（%s 模式）", m.opts.DiffMode))
 		}
 		help := phaseHelpStyle.Width(m.termWidth).Render("  Ctrl+C 取消")
-		content := lipgloss.NewStyle().Padding(2).Render(m.spinner.View() + " 正在调用 AI 分析变更并生成提交...")
+		content := lipgloss.NewStyle().Padding(2).Render(m.spinner.View() + " 正在调用 AI 分析变更...")
 		return lipgloss.JoinVertical(lipgloss.Left, header, content, help)
 
-	case phaseConfirm:
-		header := phaseHeaderStyle.Width(m.termWidth).Render("  确认 commit message")
-		help := phaseHelpStyle.Width(m.termWidth).Render("  Y/Enter 确认 │ e 编辑 │ n 取消(回滚) │ Ctrl+C 退出")
+	case phaseAuthorize:
+		return m.renderAuthorizeView()
 
-		msgBox := commitMsgBoxStyle.Width(min(m.termWidth-4, 80)).Render(m.commitMessage)
-
-		var toolLog string
-		if len(m.toolResults) > 0 {
-			var b strings.Builder
-			b.WriteString("\n  工具调用记录：\n")
-			for _, tr := range m.toolResults {
-				icon := "→"
-				if strings.Contains(tr.Result, "SUCCESS") {
-					icon = "✓"
-				} else if strings.Contains(tr.Result, "FAILED") {
-					icon = "✗"
-				}
-				b.WriteString(fmt.Sprintf("  %s %s\n", icon, truncateResult(tr.ToolName+" → "+tr.Result, 100)))
-			}
-			toolLog = lipgloss.NewStyle().Foreground(lipgloss.Color("241")).Render(b.String())
-		}
-
-		content := lipgloss.NewStyle().Padding(2).Render(
-			"AI 生成的 commit message：\n\n" + msgBox + toolLog)
-		return lipgloss.JoinVertical(lipgloss.Left, header, content, help)
-
-	case phaseEdit:
-		header := phaseHeaderStyle.Width(m.termWidth).Render("  编辑 commit message")
-		help := phaseHelpStyle.Width(m.termWidth).Render("  Ctrl+S 保存 │ Esc 取消编辑 │ Ctrl+C 退出")
-		content := lipgloss.NewStyle().Padding(2).Render(m.textarea.View())
-		return lipgloss.JoinVertical(lipgloss.Left, header, content, help)
-
-	case phaseCommitting:
-		header := phaseHeaderStyle.Width(m.termWidth).Render("  提交中...")
+	case phaseExecuting:
+		header := phaseHeaderStyle.Width(m.termWidth).Render("  执行工具调用...")
 		help := phaseHelpStyle.Width(m.termWidth).Render("  Ctrl+C 取消")
-		content := lipgloss.NewStyle().Padding(2).Render(m.spinner.View() + " 正在执行 git commit...")
+		content := lipgloss.NewStyle().Padding(2).Render(m.spinner.View() + " 正在执行...")
 		return lipgloss.JoinVertical(lipgloss.Left, header, content, help)
 
 	case phaseResult:
@@ -455,29 +428,49 @@ func (m *CommitFlowModel) View() string {
 	case phaseError:
 		header := phaseHeaderStyle.Width(m.termWidth).Render("  错误")
 		help := phaseHelpStyle.Width(m.termWidth).Render("  任意键退出")
-
-		var toolLog string
-		if len(m.toolResults) > 0 {
-			var b strings.Builder
-			b.WriteString("\n  工具调用记录：\n")
-			for _, tr := range m.toolResults {
-				icon := "→"
-				if strings.Contains(tr.Result, "SUCCESS") {
-					icon = "✓"
-				} else if strings.Contains(tr.Result, "FAILED") {
-					icon = "✗"
-				}
-				b.WriteString(fmt.Sprintf("  %s %s\n", icon, truncateResult(tr.ToolName+" → "+tr.Result, 150)))
-			}
-			toolLog = lipgloss.NewStyle().Foreground(lipgloss.Color("241")).Render(b.String())
-		}
-
-		content := lipgloss.NewStyle().Padding(2).Render(
-			errorStyle.Render(m.errorMsg) + toolLog)
+		content := lipgloss.NewStyle().Padding(2).Render(errorStyle.Render(m.errorMsg))
 		return lipgloss.JoinVertical(lipgloss.Left, header, content, help)
 	}
 
 	return ""
+}
+
+func (m *CommitFlowModel) renderAuthorizeView() string {
+	w := m.termWidth
+	if w == 0 {
+		w = 80
+	}
+	maxW := min(w-4, 90)
+
+	var items []string
+	for i, tc := range m.pendingCalls {
+		var b strings.Builder
+		b.WriteString(fmt.Sprintf("  %d. ", i+1))
+		b.WriteString(toastToolNameStyle.Render(tc.Name))
+		b.WriteString("\n")
+
+		if tc.Name == "git_commit" || tc.Name == "git_commit_amend" {
+			msg := tc.ArgString("message")
+			b.WriteString(toastArgsStyle.Render("     message: ") + msg + "\n")
+		} else if len(tc.Args) > 0 {
+			argsJSON, _ := json.MarshalIndent(tc.Args, "     ", "  ")
+			b.WriteString(toastArgsStyle.Render(string(argsJSON)) + "\n")
+		}
+		items = append(items, b.String())
+	}
+
+	if len(items) == 0 {
+		items = append(items, "  (无工具调用)")
+	}
+
+	toastContent := strings.Join(items, "\n")
+
+	toastTitle := toastTitleStyle.Render("  AI 请求执行工具调用")
+	toastBody := toastStyle.Width(maxW).Render(toastContent)
+
+	help := phaseHelpStyle.Width(w).Render("  Y/Enter 授权执行 │ N 拒绝并取消 │ Ctrl+C 退出")
+
+	return lipgloss.JoinVertical(lipgloss.Left, toastTitle, "\n"+toastBody+"\n", help)
 }
 
 func (m *CommitFlowModel) GetResult() CommitFlowResult {
@@ -498,11 +491,16 @@ type CommitFlowResult struct {
 	SelectedFiles []string
 }
 
-func truncateResult(s string, maxLen int) string {
-	if len(s) <= maxLen {
-		return s
+func extractHash(results []ai.ToolCallResult) string {
+	for _, tr := range results {
+		if (tr.ToolName == "git_commit" || tr.ToolName == "git_commit_amend") && strings.Contains(tr.Result, "SUCCESS") {
+			parts := strings.Fields(tr.Result)
+			if len(parts) >= 4 {
+				return parts[3]
+			}
+		}
 	}
-	return s[:maxLen] + "..."
+	return ""
 }
 
 func RunCommitFlow(files []diff.FileChange, opts CommitFlowOptions) (CommitFlowResult, error) {

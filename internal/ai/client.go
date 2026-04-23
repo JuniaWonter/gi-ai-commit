@@ -79,107 +79,211 @@ func (c *Client) GenerateCommitMessage(diffContent, description string) (string,
 	return message, nil
 }
 
+func (c *Client) GenerateCommitMessageWithConventions(diffContent, description string, conventionInfo git.ConventionInfo) (string, error) {
+	systemPrompt := buildGenerateSystemPrompt(conventionInfo)
+	userPrompt := buildGeneratePrompt(diffContent, description)
+
+	req := openai.ChatCompletionRequest{
+		Model: c.config.Model,
+		Messages: []openai.ChatCompletionMessage{
+			{Role: openai.ChatMessageRoleSystem, Content: systemPrompt},
+			{Role: openai.ChatMessageRoleUser, Content: userPrompt},
+		},
+		Temperature: 0.3,
+	}
+
+	ctx, cancel := context.WithTimeout(context.Background(), c.config.Timeout)
+	defer cancel()
+
+	resp, err := c.client.CreateChatCompletion(ctx, req)
+	if err != nil {
+		return "", fmt.Errorf("调用 AI API 失败：%w", err)
+	}
+
+	if len(resp.Choices) == 0 {
+		return "", fmt.Errorf("API 返回空响应")
+	}
+
+	return strings.TrimSpace(resp.Choices[0].Message.Content), nil
+}
+
 type ToolCallResult struct {
 	ToolName string
 	Args     json.RawMessage
 	Result   string
 }
 
-func (c *Client) CommitWithRetry(diffContent, description string, conventionInfo git.ConventionInfo, maxRetries int) (string, []ToolCallResult, error) {
-	systemPrompt := buildSystemPrompt(conventionInfo)
-	userPrompt := buildRetryPrompt(diffContent, description, conventionInfo)
+type PendingToolCall struct {
+	ID       string
+	Name     string
+	ArgsJSON string
+	Args     map[string]interface{}
+}
 
-	tools := buildOpenAITools()
+func (p PendingToolCall) ArgString(key string) string {
+	if v, ok := p.Args[key]; ok {
+		if s, ok := v.(string); ok {
+			return s
+		}
+	}
+	return ""
+}
+
+type CommitSession struct {
+	client      *Client
+	messages    []openai.ChatCompletionMessage
+	tools       []openai.Tool
+	retryCount  int
+	maxRetries  int
+	toolResults []ToolCallResult
+	commitMsg   string
+}
+
+type CommitResult struct {
+	Success     bool
+	CommitMsg   string
+	ToolResults []ToolCallResult
+	Error       error
+}
+
+func (c *Client) StartCommitSession(diffContent, description string, conventionInfo git.ConventionInfo, maxRetries int) (*CommitSession, []PendingToolCall, error) {
+	systemPrompt := buildAuthSystemPrompt(conventionInfo)
+	userPrompt := buildAuthPrompt(diffContent, description)
 
 	messages := []openai.ChatCompletionMessage{
 		{Role: openai.ChatMessageRoleSystem, Content: systemPrompt},
 		{Role: openai.ChatMessageRoleUser, Content: userPrompt},
 	}
 
-	var toolResults []ToolCallResult
-	var lastCommitMsg string
-	retryCount := 0
+	sess := &CommitSession{
+		client:     c,
+		messages:   messages,
+		tools:      buildOpenAITools(),
+		maxRetries: maxRetries,
+	}
 
-	for retryCount <= maxRetries {
-		req := openai.ChatCompletionRequest{
-			Model:       c.config.Model,
-			Messages:    messages,
-			Tools:       tools,
-			Temperature: 0.3,
+	pending, err := sess.callAI()
+	return sess, pending, err
+}
+
+func (s *CommitSession) callAI() ([]PendingToolCall, error) {
+	req := openai.ChatCompletionRequest{
+		Model:       s.client.config.Model,
+		Messages:    s.messages,
+		Tools:       s.tools,
+		Temperature: 0.3,
+	}
+
+	ctx, cancel := context.WithTimeout(context.Background(), s.client.config.Timeout)
+	defer cancel()
+
+	resp, err := s.client.client.CreateChatCompletion(ctx, req)
+	if err != nil {
+		return nil, fmt.Errorf("调用 AI API 失败：%w", err)
+	}
+
+	if len(resp.Choices) == 0 {
+		return nil, fmt.Errorf("API 返回空响应")
+	}
+
+	choice := resp.Choices[0]
+	s.messages = append(s.messages, choice.Message)
+
+	if choice.Message.ToolCalls == nil || len(choice.Message.ToolCalls) == 0 {
+		msg := strings.TrimSpace(choice.Message.Content)
+		if msg == "" {
+			msg = "chore: 提交变更"
 		}
+		s.commitMsg = msg
+		return nil, nil
+	}
 
-		ctx, cancel := context.WithTimeout(context.Background(), c.config.Timeout)
-		resp, err := c.client.CreateChatCompletion(ctx, req)
-		cancel()
+	var pending []PendingToolCall
+	for _, tc := range choice.Message.ToolCalls {
+		var args map[string]interface{}
+		json.Unmarshal(json.RawMessage(tc.Function.Arguments), &args)
+		pending = append(pending, PendingToolCall{
+			ID:       tc.ID,
+			Name:     tc.Function.Name,
+			ArgsJSON: tc.Function.Arguments,
+			Args:     args,
+		})
+	}
 
-		if err != nil {
-			return "", toolResults, fmt.Errorf("调用 AI API 失败：%w", err)
+	return pending, nil
+}
+
+func (s *CommitSession) ExecuteAndResume(authorized []bool) ([]PendingToolCall, error) {
+	if s.retryCount > s.maxRetries {
+		classified := git.ClassifyCommitError(findLastStderr(s.toolResults))
+		if classified.Category == git.ErrorUnrecoverable {
+			return nil, fmt.Errorf("不可恢复的错误：%s\n建议：%s", classified.Message, classified.Suggestion)
 		}
+		return nil, fmt.Errorf("重试次数已达上限（%d 次），请手动处理", s.maxRetries)
+	}
 
-		if len(resp.Choices) == 0 {
-			return "", toolResults, fmt.Errorf("API 返回空响应")
-		}
-
-		choice := resp.Choices[0]
-
-		if choice.Message.ToolCalls == nil || len(choice.Message.ToolCalls) == 0 {
-			lastCommitMsg = strings.TrimSpace(choice.Message.Content)
-			if lastCommitMsg == "" {
-				lastCommitMsg = "chore: 提交变更"
-			}
-			return lastCommitMsg, toolResults, nil
-		}
-
-		messages = append(messages, choice.Message)
-
-		for _, toolCall := range choice.Message.ToolCalls {
-			result := executeToolCall(toolCall.Function.Name, toolCall.Function.Arguments)
-			toolResults = append(toolResults, ToolCallResult{
-				ToolName: toolCall.Function.Name,
-				Args:     json.RawMessage(toolCall.Function.Arguments),
-				Result:   result,
-			})
-
-			if toolCall.Function.Name == "git_commit" || toolCall.Function.Name == "git_commit_amend" {
-				var args struct {
-					Message string `json:"message"`
-				}
-				json.Unmarshal(json.RawMessage(toolCall.Function.Arguments), &args)
-				lastCommitMsg = args.Message
-			}
-
-			messages = append(messages, openai.ChatCompletionMessage{
+	for i, auth := range authorized {
+		if !auth {
+			s.messages = append(s.messages, openai.ChatCompletionMessage{
 				Role:       openai.ChatMessageRoleTool,
-				Content:    result,
-				ToolCallID: toolCall.ID,
+				Content:    "用户拒绝了此工具调用",
+				ToolCallID: s.messages[len(s.messages)-1].ToolCalls[i].ID,
 			})
+			continue
 		}
 
-		committed := false
-		for _, tr := range toolResults {
-			if tr.ToolName == "git_commit" || tr.ToolName == "git_commit_amend" {
-				if strings.Contains(tr.Result, "SUCCESS") {
-					committed = true
-					break
-				}
+		tc := s.messages[len(s.messages)-1].ToolCalls[i]
+		result := executeToolCall(tc.Function.Name, tc.Function.Arguments)
+		s.toolResults = append(s.toolResults, ToolCallResult{
+			ToolName: tc.Function.Name,
+			Args:     json.RawMessage(tc.Function.Arguments),
+			Result:   result,
+		})
+
+		if tc.Function.Name == "git_commit" || tc.Function.Name == "git_commit_amend" {
+			var args struct {
+				Message string `json:"message"`
 			}
+			json.Unmarshal(json.RawMessage(tc.Function.Arguments), &args)
+			s.commitMsg = args.Message
 		}
 
-		if committed {
-			return lastCommitMsg, toolResults, nil
-		}
+		s.messages = append(s.messages, openai.ChatCompletionMessage{
+			Role:       openai.ChatMessageRoleTool,
+			Content:    result,
+			ToolCallID: tc.ID,
+		})
+	}
 
-		retryCount++
-		if retryCount > maxRetries {
-			classified := git.ClassifyCommitError(findLastStderr(toolResults))
-			if classified.Category == git.ErrorUnrecoverable {
-				return "", toolResults, fmt.Errorf("不可恢复的错误：%s\n建议：%s", classified.Message, classified.Suggestion)
-			}
-			return lastCommitMsg, toolResults, fmt.Errorf("重试次数已达上限（%d 次），请手动处理\n最后错误：%s", maxRetries, classified.RawStderr)
+	committed := false
+	for _, tr := range s.toolResults {
+		if (tr.ToolName == "git_commit" || tr.ToolName == "git_commit_amend") && strings.Contains(tr.Result, "SUCCESS") {
+			committed = true
+			break
 		}
 	}
 
-	return lastCommitMsg, toolResults, nil
+	if committed {
+		return nil, nil
+	}
+
+	s.retryCount++
+	return s.callAI()
+}
+
+func (s *CommitSession) GetResult() CommitResult {
+	if s.commitMsg != "" {
+		return CommitResult{
+			Success:     true,
+			CommitMsg:   s.commitMsg,
+			ToolResults: s.toolResults,
+		}
+	}
+	return CommitResult{
+		Success:     false,
+		ToolResults: s.toolResults,
+		Error:       fmt.Errorf("提交未完成"),
+	}
 }
 
 func executeToolCall(name, argsJSON string) string {
@@ -232,7 +336,7 @@ func executeToolCall(name, argsJSON string) string {
 	case "git_hook_check":
 		info := git.DetectConventions()
 		if info.HookExists {
-			return fmt.Sprintf("EXISTS: commit-msg hook 存在于 %s\n内容摘要：\n%s", info.HookPath, truncate(info.HookContent, 500))
+			return fmt.Sprintf("EXISTS: commit-msg hook 存在于 %s", info.HookPath)
 		}
 		return "NOT_FOUND: 仓库没有 commit-msg hook"
 
@@ -304,25 +408,82 @@ func buildOpenAITools() []openai.Tool {
 	return tools
 }
 
-func buildSystemPrompt(conventionInfo git.ConventionInfo) string {
+func buildGenerateSystemPrompt(conventionInfo git.ConventionInfo) string {
 	var b strings.Builder
 	b.WriteString("你是一个 Git commit message 生成助手。\n")
-	b.WriteString("你的职责是根据代码变更生成合适的 commit message 并使用 git_commit 工具提交。\n")
-	b.WriteString("如果提交失败，你需要根据错误信息调整 commit message 格式，然后使用 git_commit_amend 修正。\n\n")
+	b.WriteString("你的职责是根据代码变更生成合适的 commit message。\n")
+	b.WriteString("只返回 commit message 内容，不要其他说明。\n")
+	b.WriteString("不要调用任何工具，直接返回文本。\n\n")
 
 	if conventionInfo.HookExists {
 		b.WriteString("重要：该仓库有 commit-msg hook 约束！\n")
-		b.WriteString("Hook 内容：\n")
+		b.WriteString("Hook 内容摘要：\n")
 		b.WriteString(truncate(conventionInfo.HookContent, 800))
 		b.WriteString("\n\n")
-		b.WriteString("你必须确保 commit message 符合 hook 要求，否则提交会被拒绝。\n\n")
+		b.WriteString("你必须确保 commit message 符合 hook 要求。\n\n")
 	}
 
 	if conventionInfo.TemplateExists {
 		b.WriteString("该仓库有 commit message 模板：\n")
 		b.WriteString(conventionInfo.TemplateContent)
 		b.WriteString("\n\n")
-		b.WriteString("请参考模板格式生成 commit message。\n\n")
+		b.WriteString("请参考模板格式生成。\n")
+	}
+
+	if len(conventionInfo.RecentMessages) > 0 {
+		b.WriteString("该仓库最近几次 commit message（参考风格）：\n")
+		for _, entry := range conventionInfo.RecentMessages {
+			b.WriteString(fmt.Sprintf("- %s\n", entry.Message))
+		}
+		b.WriteString("\n请遵循已有的风格格式。\n")
+	}
+
+	return b.String()
+}
+
+func buildGeneratePrompt(diffContent, description string) string {
+	var b strings.Builder
+
+	b.WriteString("请根据以下代码变更生成 commit message。\n\n")
+
+	if description != "" {
+		b.WriteString("项目描述：\n")
+		b.WriteString(description)
+		b.WriteString("\n\n")
+	}
+
+	b.WriteString("代码变更：\n")
+	b.WriteString(diffContent)
+	b.WriteString("\n\n")
+
+	b.WriteString("要求：\n")
+	b.WriteString("1. 使用中文，只返回 commit message 内容\n")
+	b.WriteString("2. 格式：<type>(<scope>): <subject>\n")
+	b.WriteString("3. type 可选：feat, fix, docs, style, refactor, test, chore\n")
+
+	return b.String()
+}
+
+func buildAuthSystemPrompt(conventionInfo git.ConventionInfo) string {
+	var b strings.Builder
+	b.WriteString("你是一个 Git commit message 生成助手。\n")
+	b.WriteString("你的职责是分析代码变更，生成 commit message，并使用工具提交。\n")
+	b.WriteString("每次调用工具前，用户会审核并授权。\n")
+	b.WriteString("如果提交失败，根据错误信息调整后使用 git_commit_amend 修正。\n\n")
+
+	if conventionInfo.HookExists {
+		b.WriteString("重要：该仓库有 commit-msg hook 约束！\n")
+		b.WriteString("Hook 内容：\n")
+		b.WriteString(truncate(conventionInfo.HookContent, 800))
+		b.WriteString("\n\n")
+		b.WriteString("你必须确保 commit message 符合 hook 要求。\n\n")
+	}
+
+	if conventionInfo.TemplateExists {
+		b.WriteString("该仓库有 commit message 模板：\n")
+		b.WriteString(conventionInfo.TemplateContent)
+		b.WriteString("\n\n")
+		b.WriteString("请参考模板格式生成。\n")
 	}
 
 	if len(conventionInfo.RecentMessages) > 0 {
@@ -334,17 +495,16 @@ func buildSystemPrompt(conventionInfo git.ConventionInfo) string {
 	}
 
 	b.WriteString("规则：\n")
-	b.WriteString("1. 先生成 commit message，然后调用 git_commit 工具提交\n")
-	b.WriteString("2. 如果提交失败且错误是可恢复的，调整格式后调用 git_commit_amend\n")
-	b.WriteString("3. 如果是不可恢复的错误（如没有变更可提交），不要重试，直接告知用户\n")
+	b.WriteString("1. 分析变更后调用 git_commit 工具提交\n")
+	b.WriteString("2. 如果提交失败且错误可恢复，调整后调用 git_commit_amend\n")
+	b.WriteString("3. 如果是不可恢复的错误，不要重试，返回文本说明原因\n")
 	b.WriteString("4. 最多重试 3 次\n")
 	b.WriteString("5. 使用中文\n")
-	b.WriteString("6. 只返回最终确认的 commit message 内容\n")
 
 	return b.String()
 }
 
-func buildRetryPrompt(diffContent, description string, conventionInfo git.ConventionInfo) string {
+func buildAuthPrompt(diffContent, description string) string {
 	var b strings.Builder
 
 	b.WriteString("请根据以下代码变更生成 commit message 并提交。\n\n")
@@ -359,8 +519,7 @@ func buildRetryPrompt(diffContent, description string, conventionInfo git.Conven
 	b.WriteString(diffContent)
 	b.WriteString("\n\n")
 
-	b.WriteString("请先分析变更内容，然后调用 git_commit 工具提交。\n")
-	b.WriteString("如果需要了解仓库格式约束，可以先调用 git_hook_check 或 git_log_recent。\n")
+	b.WriteString("请分析变更，调用 git_commit 工具提交。如果需要了解仓库格式，可以调用 git_hook_check 或 git_log_recent。\n")
 
 	return b.String()
 }

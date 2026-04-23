@@ -182,6 +182,24 @@ func (f *FileSelector) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 
 	case diffLoadedMsg:
 		f.diffLoading = false
+		if !f.ready {
+			w := f.termWidth
+			h := f.termHeight
+			if w == 0 {
+				w = 80
+			}
+			if h == 0 {
+				h = 24
+			}
+			f.viewport = viewport.New(w, h-3)
+			f.viewport.Style = lipgloss.NewStyle()
+			halfW := w / 2 - 2
+			f.leftVP = viewport.New(halfW, h-5)
+			f.leftVP.Style = lipgloss.NewStyle()
+			f.rightVP = viewport.New(halfW, h-5)
+			f.rightVP.Style = lipgloss.NewStyle()
+			f.ready = true
+		}
 		if msg.err != nil {
 			errContent := lipgloss.NewStyle().
 				Foreground(lipgloss.Color("1")).
@@ -265,12 +283,40 @@ func (f *FileSelector) scrollViewports(msg tea.Msg) (tea.Model, tea.Cmd) {
 }
 
 func (f *FileSelector) refreshDiffView() {
+	w := f.termWidth
+	h := f.termHeight
+	if w == 0 {
+		w = 80
+	}
+	if h == 0 {
+		h = 24
+	}
 	f.computeStats(f.rawDiff)
 	content := f.renderDiffContent(f.rawDiff)
+	if !f.ready {
+		f.viewport = viewport.New(w, h-3)
+		f.viewport.Style = lipgloss.NewStyle()
+		halfW := w / 2 - 2
+		f.leftVP = viewport.New(halfW, h-5)
+		f.leftVP.Style = lipgloss.NewStyle()
+		f.rightVP = viewport.New(halfW, h-5)
+		f.rightVP.Style = lipgloss.NewStyle()
+		f.ready = true
+	}
+	f.viewport.Width = w
+	f.viewport.Height = h - 3
 	f.viewport.SetContent(content)
+	f.viewport.YOffset = 0
 	leftContent, rightContent := f.renderDiffSideBySideContent(f.rawDiff)
+	halfW := w / 2 - 2
+	f.leftVP.Width = halfW
+	f.leftVP.Height = h - 5
 	f.leftVP.SetContent(leftContent)
+	f.leftVP.YOffset = 0
+	f.rightVP.Width = halfW
+	f.rightVP.Height = h - 5
 	f.rightVP.SetContent(rightContent)
+	f.rightVP.YOffset = 0
 }
 
 func (f *FileSelector) handleDiffKeys(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
@@ -552,11 +598,16 @@ func parseDiffLines(content string) []diffLine {
 
 func (f *FileSelector) renderDiffContent(raw string) string {
 	dlines := parseDiffLines(raw)
-	oldNums, newNums := f.computeLineNumbers(raw)
 	lineNumWidth := 5
 	var b strings.Builder
+	oldLine := 0
+	newLine := 0
 
-	for i, dl := range dlines {
+	for _, dl := range dlines {
+		if dl.typ == "hunk" {
+			oldLine, newLine = parseHunkLineNumbers(dl.content)
+		}
+
 		if f.hideContext && dl.typ == "context" {
 			continue
 		}
@@ -569,19 +620,36 @@ func (f *FileSelector) renderDiffContent(raw string) string {
 			line = hunkHeaderStyle.Render(line)
 		case "added":
 			line = addedLineStyle.Render(line)
+			newLine++
 		case "removed":
 			line = removedLineStyle.Render(line)
+			oldLine++
 		case "context":
 			line = contextLineStyle.Render(line)
+			oldLine++
+			newLine++
 		case "oldFile":
 			line = removedLineStyle.Render(line)
 		case "newFile":
 			line = addedLineStyle.Render(line)
 		}
 
-		if f.showLineNum && oldNums[i] >= 0 || newNums[i] >= 0 {
-			oldN := formatLineNum(oldNums[i], lineNumWidth)
-			newN := formatLineNum(newNums[i], lineNumWidth)
+		if f.showLineNum {
+			var oldN, newN string
+			switch dl.typ {
+			case "added":
+				oldN = formatLineNum(-1, lineNumWidth)
+				newN = formatLineNum(newLine-1, lineNumWidth)
+			case "removed":
+				oldN = formatLineNum(oldLine-1, lineNumWidth)
+				newN = formatLineNum(-1, lineNumWidth)
+			case "context":
+				oldN = formatLineNum(oldLine-1, lineNumWidth)
+				newN = formatLineNum(newLine-1, lineNumWidth)
+			default:
+				b.WriteString(line + "\n")
+				continue
+			}
 			b.WriteString(oldN + " " + newN + " " + line + "\n")
 		} else {
 			b.WriteString(line + "\n")
@@ -592,55 +660,54 @@ func (f *FileSelector) renderDiffContent(raw string) string {
 
 func (f *FileSelector) renderDiffSideBySideContent(raw string) (string, string) {
 	dlines := parseDiffLines(raw)
-	oldNums, newNums := f.computeLineNumbers(raw)
 	lineNumWidth := 4
 
 	var leftLines, rightLines []string
+	oldLine := 0
+	newLine := 0
 
 	i := 0
 	for i < len(dlines) {
 		dl := dlines[i]
 		switch dl.typ {
-		case "header", "hunk", "oldFile", "newFile":
+		case "hunk":
+			oldLine, newLine = parseHunkLineNumbers(dl.content)
+			leftLines = append(leftLines, hunkHeaderStyle.Render(dl.content))
+			rightLines = append(rightLines, hunkHeaderStyle.Render(dl.content))
+			i++
+		case "header", "oldFile", "newFile":
 			rendered := renderDiffLine(dl)
-			if f.hideContext {
-				leftLines = append(leftLines, rendered)
-				rightLines = append(rightLines, rendered)
-			} else {
-				leftLines = append(leftLines, rendered)
-				rightLines = append(rightLines, rendered)
-			}
+			leftLines = append(leftLines, rendered)
+			rightLines = append(rightLines, rendered)
 			i++
 		case "removed":
 			removedBatch := []diffLine{dl}
-			removedIdxs := []int{i}
 			j := i + 1
 			for j < len(dlines) && dlines[j].typ == "removed" {
 				removedBatch = append(removedBatch, dlines[j])
-				removedIdxs = append(removedIdxs, j)
 				j++
 			}
 			addedBatch := []diffLine{}
-			addedIdxs := []int{}
 			for j < len(dlines) && dlines[j].typ == "added" {
 				addedBatch = append(addedBatch, dlines[j])
-				addedIdxs = append(addedIdxs, j)
 				j++
 			}
 			maxLen := max(len(removedBatch), len(addedBatch))
 			for k := 0; k < maxLen; k++ {
 				var left, right string
 				if k < len(removedBatch) {
-					lNum := formatLineNum(oldNums[removedIdxs[k]], lineNumWidth)
+					lNum := formatLineNum(oldLine, lineNumWidth)
 					content := removedLineStyle.Render(removedBatch[k].content)
 					left = lNum + " " + content
+					oldLine++
 				} else {
 					left = strings.Repeat(" ", lineNumWidth+1)
 				}
 				if k < len(addedBatch) {
-					rNum := formatLineNum(newNums[addedIdxs[k]], lineNumWidth)
+					rNum := formatLineNum(newLine, lineNumWidth)
 					content := addedLineStyle.Render(addedBatch[k].content)
 					right = rNum + " " + content
+					newLine++
 				} else {
 					right = strings.Repeat(" ", lineNumWidth+1)
 				}
@@ -649,17 +716,20 @@ func (f *FileSelector) renderDiffSideBySideContent(raw string) (string, string) 
 			}
 			i = j
 		case "added":
-			rNum := formatLineNum(newNums[i], lineNumWidth)
+			rNum := formatLineNum(newLine, lineNumWidth)
 			content := addedLineStyle.Render(dl.content)
 			rightLines = append(rightLines, rNum+" "+content)
 			leftLines = append(leftLines, strings.Repeat(" ", lineNumWidth+1))
+			newLine++
 			i++
 		case "context":
 			if !f.hideContext {
-				oNum := formatLineNum(oldNums[i], lineNumWidth)
-				nNum := formatLineNum(newNums[i], lineNumWidth)
+				oNum := formatLineNum(oldLine, lineNumWidth)
+				nNum := formatLineNum(newLine, lineNumWidth)
 				leftLines = append(leftLines, oNum+" "+contextLineStyle.Render(dl.content))
 				rightLines = append(rightLines, nNum+" "+contextLineStyle.Render(dl.content))
+				oldLine++
+				newLine++
 			}
 			i++
 		default:
@@ -852,10 +922,14 @@ func (f *FileSelector) renderDiffView() string {
 			Foreground(lipgloss.Color("241")).
 			Render("加载 diff 中...")
 	} else if f.showStat {
+		f.viewport.Width = f.termWidth
+		f.viewport.Height = f.termHeight - 3
 		content = f.viewport.View()
 	} else if f.splitView {
 		content = f.renderSplitView()
 	} else {
+		f.viewport.Width = f.termWidth
+		f.viewport.Height = f.termHeight - 3
 		mainContent := f.viewport.View()
 		minimap := f.renderMinimap()
 		if minimap != "" && !f.showStat {
@@ -876,6 +950,11 @@ func (f *FileSelector) renderDiffView() string {
 func (f *FileSelector) renderSplitView() string {
 	sep := splitSeparatorStyle.Render("│")
 	halfW := f.termWidth / 2 - 1
+
+	f.leftVP.Width = halfW
+	f.leftVP.Height = f.termHeight - 5
+	f.rightVP.Width = halfW
+	f.rightVP.Height = f.termHeight - 5
 
 	leftLabel := splitLabelStyle.Width(halfW).Render(" 删除(-)")
 	rightLabel := splitLabelAddedStyle.Width(halfW).Render(" 新增(+)")
