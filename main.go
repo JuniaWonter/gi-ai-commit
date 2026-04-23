@@ -1,7 +1,6 @@
 package main
 
 import (
-	"errors"
 	"flag"
 	"fmt"
 	"os"
@@ -35,10 +34,9 @@ func main() {
 		}
 
 		if err := cmd.RunCommit(opts); err != nil {
-			if errors.Is(err, cmd.ErrUserCancelled) {
-				fmt.Println("❌ 已取消提交")
-				os.Exit(0)
-			}
+		if err.Error() == "用户取消提交" {
+			os.Exit(130)
+		}
 			fmt.Fprintf(os.Stderr, "❌ 错误：%v\n", err)
 			os.Exit(1)
 		}

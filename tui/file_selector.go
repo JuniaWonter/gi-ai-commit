@@ -375,7 +375,7 @@ func (f *FileSelector) handleSelectorKeys(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 		}
 		if hasSelected {
 			f.done = true
-			return f, tea.Quit
+			return f, nil
 		}
 	}
 	return f, nil

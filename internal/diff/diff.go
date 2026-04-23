@@ -172,6 +172,12 @@ func StageFiles(paths []string) error {
 		return fmt.Errorf("获取 git 根目录失败：%w", err)
 	}
 
+	resetCmd := exec.Command("git", "reset")
+	resetCmd.Dir = gitRoot
+	if err := resetCmd.Run(); err != nil {
+		return fmt.Errorf("清空暂存区失败：%w", err)
+	}
+
 	var toStage, toDelete []string
 	for _, p := range paths {
 		if _, err := os.Stat(filepath.Join(gitRoot, p)); os.IsNotExist(err) {

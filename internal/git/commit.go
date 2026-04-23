@@ -114,6 +114,10 @@ func ResetLastCommit() CommitResult {
 	return CommitResult{Success: true}
 }
 
+func GetGitRoot() (string, error) {
+	return getGitRoot()
+}
+
 func getGitRoot() (string, error) {
 	cmd := exec.Command("git", "rev-parse", "--show-toplevel")
 	output, err := cmd.Output()

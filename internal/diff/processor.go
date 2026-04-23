@@ -55,7 +55,7 @@ func (p *DiffProcessor) BuildPayloadsForFiles(files []string) ([]DiffPayload, er
 	var err error
 
 	if len(files) == 0 {
-		fullDiff, err = p.getStagedDiff()
+		fullDiff, err = p.getAllDiff()
 	} else {
 		args := append([]string{"diff", "--cached", "--no-ext-diff", "--unified=1", "--"}, files...)
 		fullDiff, err = p.getCmdOutput("git", args...)
@@ -64,6 +64,31 @@ func (p *DiffProcessor) BuildPayloadsForFiles(files []string) ([]DiffPayload, er
 		return nil, err
 	}
 	return p.buildPayloadsFromDiff(fullDiff, files)
+}
+
+func (p *DiffProcessor) getAllDiff() (string, error) {
+	cached, _ := p.getCmdOutput("git", "diff", "--cached", "--no-ext-diff", "--unified=1")
+	unstaged, _ := p.getCmdOutput("git", "diff", "--no-ext-diff", "--unified=1")
+
+	diff := strings.TrimSpace(cached) + "\n" + strings.TrimSpace(unstaged)
+	diff = strings.TrimSpace(diff)
+
+	if diff == "" {
+		changedFiles, _ := GetChangedFiles()
+		var b strings.Builder
+		for _, f := range changedFiles {
+			d, _, _ := GetFileDiffFull(f.Path, false)
+			if d != "" {
+				b.WriteString(d + "\n")
+			}
+		}
+		diff = strings.TrimSpace(b.String())
+	}
+
+	if diff == "" {
+		return "", fmt.Errorf("没有检测到任何代码变更")
+	}
+	return diff, nil
 }
 
 func (p *DiffProcessor) buildPayloadsFromDiff(fullDiff string, files []string) ([]DiffPayload, error) {
