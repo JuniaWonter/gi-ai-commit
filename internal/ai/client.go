@@ -137,6 +137,13 @@ type CommitSession struct {
 	maxRetries  int
 	toolResults []ToolCallResult
 	commitMsg   string
+	streaming   bool
+}
+
+type StreamChunk struct {
+	Thinking string
+	Content  string
+	Done     bool
 }
 
 type CommitResult struct {
@@ -146,7 +153,7 @@ type CommitResult struct {
 	Error       error
 }
 
-func (c *Client) StartCommitSession(diffContent, description string, conventionInfo git.ConventionInfo, maxRetries int) (*CommitSession, []PendingToolCall, error) {
+func (c *Client) StartCommitSession(diffContent, description string, conventionInfo git.ConventionInfo, maxRetries int) (*CommitSession, error) {
 	systemPrompt := buildAuthSystemPrompt(conventionInfo)
 	userPrompt := buildAuthPrompt(diffContent, description)
 
@@ -162,35 +169,96 @@ func (c *Client) StartCommitSession(diffContent, description string, conventionI
 		maxRetries: maxRetries,
 	}
 
-	pending, err := sess.callAI()
-	return sess, pending, err
+	return sess, nil
 }
 
-func (s *CommitSession) callAI() ([]PendingToolCall, error) {
+func (s *CommitSession) StreamAI(send func(chunk StreamChunk)) ([]PendingToolCall, error) {
+	s.streaming = true
 	req := openai.ChatCompletionRequest{
 		Model:       s.client.config.Model,
 		Messages:    s.messages,
 		Tools:       s.tools,
 		Temperature: 0.3,
+		Stream:      true,
 	}
 
 	ctx, cancel := context.WithTimeout(context.Background(), s.client.config.Timeout)
 	defer cancel()
 
-	resp, err := s.client.client.CreateChatCompletion(ctx, req)
+	stream, err := s.client.client.CreateChatCompletionStream(ctx, req)
 	if err != nil {
 		return nil, fmt.Errorf("调用 AI API 失败：%w", err)
 	}
+	defer stream.Close()
 
-	if len(resp.Choices) == 0 {
-		return nil, fmt.Errorf("API 返回空响应")
+	var fullContent strings.Builder
+	var fullThinking strings.Builder
+	var toolCalls []openai.ToolCall
+
+	for {
+		resp, err := stream.Recv()
+		if err != nil {
+			break
+		}
+
+		if len(resp.Choices) == 0 {
+			continue
+		}
+
+		delta := resp.Choices[0].Delta
+
+		// Handle thinking (reasoning_content)
+		if delta.ReasoningContent != "" {
+			fullThinking.WriteString(delta.ReasoningContent)
+			send(StreamChunk{Thinking: delta.ReasoningContent})
+		}
+
+		// Handle tool calls
+		if len(delta.ToolCalls) > 0 {
+			for _, tc := range delta.ToolCalls {
+				if tc.Function.Name != "" {
+					toolCalls = append(toolCalls, openai.ToolCall{
+						ID:   tc.ID,
+						Type: tc.Type,
+						Function: openai.FunctionCall{
+							Name:      tc.Function.Name,
+							Arguments: tc.Function.Arguments,
+						},
+					})
+				} else if len(toolCalls) > 0 && tc.Function.Arguments != "" {
+					toolCalls[len(toolCalls)-1].Function.Arguments += tc.Function.Arguments
+				}
+			}
+			continue
+		}
+
+		// Handle content
+		if delta.Content != "" {
+			fullContent.WriteString(delta.Content)
+			send(StreamChunk{Content: delta.Content})
+		}
+
+		if resp.Choices[0].FinishReason != "" {
+			break
+		}
 	}
 
-	choice := resp.Choices[0]
-	s.messages = append(s.messages, choice.Message)
+	send(StreamChunk{Done: true})
+	s.streaming = false
 
-	if choice.Message.ToolCalls == nil || len(choice.Message.ToolCalls) == 0 {
-		msg := strings.TrimSpace(choice.Message.Content)
+	// Build the assistant message
+	assistantMsg := openai.ChatCompletionMessage{
+		Role:    openai.ChatMessageRoleAssistant,
+		Content: strings.TrimSpace(fullContent.String()),
+	}
+	if len(toolCalls) > 0 {
+		assistantMsg.ToolCalls = toolCalls
+	}
+	s.messages = append(s.messages, assistantMsg)
+
+	// If no tool calls, store the commit message
+	if len(toolCalls) == 0 {
+		msg := strings.TrimSpace(fullContent.String())
 		if msg == "" {
 			msg = "chore: 提交变更"
 		}
@@ -199,7 +267,7 @@ func (s *CommitSession) callAI() ([]PendingToolCall, error) {
 	}
 
 	var pending []PendingToolCall
-	for _, tc := range choice.Message.ToolCalls {
+	for _, tc := range toolCalls {
 		var args map[string]interface{}
 		json.Unmarshal(json.RawMessage(tc.Function.Arguments), &args)
 		pending = append(pending, PendingToolCall{
@@ -214,6 +282,10 @@ func (s *CommitSession) callAI() ([]PendingToolCall, error) {
 }
 
 func (s *CommitSession) ExecuteAndResume(authorized []bool) ([]PendingToolCall, error) {
+	return s.ExecuteAndResumeWithStream(authorized, func(chunk StreamChunk) {})
+}
+
+func (s *CommitSession) ExecuteAndResumeWithStream(authorized []bool, send func(chunk StreamChunk)) ([]PendingToolCall, error) {
 	if s.retryCount > s.maxRetries {
 		classified := git.ClassifyCommitError(findLastStderr(s.toolResults))
 		if classified.Category == git.ErrorUnrecoverable {
@@ -268,7 +340,7 @@ func (s *CommitSession) ExecuteAndResume(authorized []bool) ([]PendingToolCall, 
 	}
 
 	s.retryCount++
-	return s.callAI()
+	return s.StreamAI(send)
 }
 
 func (s *CommitSession) GetResult() CommitResult {

@@ -37,6 +37,10 @@ type aiResponseMsg struct {
 	err     error
 }
 
+type streamChunkMsg struct {
+	chunk ai.StreamChunk
+}
+
 type execDoneMsg struct {
 	pending []ai.PendingToolCall
 	err     error
@@ -125,6 +129,11 @@ type CommitFlowModel struct {
 	selectedFiles  []string
 	stagedFiles    []string
 	originalStaged []string
+	streamChan     chan tea.Msg
+
+	streamThinking strings.Builder
+	streamContent  strings.Builder
+	streamDone     bool
 }
 
 func NewCommitFlowModel(files []diff.FileChange, opts CommitFlowOptions) *CommitFlowModel {
@@ -186,6 +195,19 @@ func (m *CommitFlowModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		m.phase = phaseError
 		m.errorMsg = "用户取消操作"
 		return m, tea.Quit
+
+	case streamChunkMsg:
+		if msg.chunk.Done {
+			m.streamDone = true
+			return m, func() tea.Msg { return <-m.streamChan }
+		}
+		if msg.chunk.Thinking != "" {
+			m.streamThinking.WriteString(msg.chunk.Thinking)
+		}
+		if msg.chunk.Content != "" {
+			m.streamContent.WriteString(msg.chunk.Content)
+		}
+		return m, func() tea.Msg { return <-m.streamChan }
 
 	case aiResponseMsg:
 		if msg.err != nil {
@@ -308,9 +330,8 @@ func (m *CommitFlowModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 				return m, tea.Quit
 			}
 		}
-		var cmd tea.Cmd
-		m.spinner, cmd = m.spinner.Update(msg)
-		return m, tea.Batch(cmd, m.spinner.Tick)
+		m.spinner, _ = m.spinner.Update(msg)
+		return m, nil
 
 	case phaseAuthorize:
 		switch msg := msg.(type) {
@@ -340,9 +361,8 @@ func (m *CommitFlowModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 				return m, tea.Quit
 			}
 		}
-		var cmd tea.Cmd
-		m.spinner, cmd = m.spinner.Update(msg)
-		return m, tea.Batch(cmd, m.spinner.Tick)
+		m.spinner, _ = m.spinner.Update(msg)
+		return m, nil
 
 	case phaseResult, phaseError:
 		switch msg.(type) {
@@ -385,27 +405,58 @@ func getStagedFiles() []string {
 }
 
 func (m *CommitFlowModel) startGenerateCmd() tea.Cmd {
-	return func() tea.Msg {
-		conventionInfo := git.DetectConventions()
-		sess, pending, err := m.opts.Client.StartCommitSession(
-			m.opts.DiffContent, m.opts.Desc, conventionInfo, 3,
-		)
-		if err != nil {
-			return aiResponseMsg{err: err}
+	conventionInfo := git.DetectConventions()
+	sess, err := m.opts.Client.StartCommitSession(
+		m.opts.DiffContent, m.opts.Desc, conventionInfo, 3,
+	)
+	if err != nil {
+		return func() tea.Msg { return aiResponseMsg{err: err} }
+	}
+	m.session = sess
+	m.streamThinking.Reset()
+	m.streamContent.Reset()
+	m.streamDone = false
+
+	m.streamChan = make(chan tea.Msg, 64)
+	go func() {
+		pending, streamErr := sess.StreamAI(func(chunk ai.StreamChunk) {
+			m.streamChan <- streamChunkMsg{chunk: chunk}
+		})
+		if streamErr != nil {
+			m.streamChan <- aiResponseMsg{err: streamErr}
+			return
 		}
-		m.session = sess
-		return aiResponseMsg{pending: pending}
+		m.streamChan <- aiResponseMsg{pending: pending}
+	}()
+
+	return func() tea.Msg {
+		return <-m.streamChan
 	}
 }
 
 func (m *CommitFlowModel) executeAuthorizedCmd() tea.Cmd {
-	return func() tea.Msg {
+	m.streamThinking.Reset()
+	m.streamContent.Reset()
+	m.streamDone = false
+
+	m.streamChan = make(chan tea.Msg, 64)
+	go func() {
 		authorized := make([]bool, len(m.pendingCalls))
 		for i := range authorized {
 			authorized[i] = true
 		}
-		pending, err := m.session.ExecuteAndResume(authorized)
-		return execDoneMsg{pending: pending, err: err}
+		pending, err := m.session.ExecuteAndResumeWithStream(authorized, func(chunk ai.StreamChunk) {
+			m.streamChan <- streamChunkMsg{chunk: chunk}
+		})
+		if err != nil {
+			m.streamChan <- execDoneMsg{err: err}
+			return
+		}
+		m.streamChan <- execDoneMsg{pending: pending}
+	}()
+
+	return func() tea.Msg {
+		return <-m.streamChan
 	}
 }
 
@@ -426,7 +477,13 @@ func (m *CommitFlowModel) View() string {
 			header = phaseHeaderStyle.Width(m.termWidth).Render(fmt.Sprintf("  生成 commit message...（%s 模式）", m.opts.DiffMode))
 		}
 		help := phaseHelpStyle.Width(m.termWidth).Render("  Ctrl+C 取消")
-		content := lipgloss.NewStyle().Padding(2).Render(m.spinner.View() + " 正在调用 AI 分析变更...")
+
+		var content string
+		if m.streamThinking.Len() > 0 || m.streamContent.Len() > 0 {
+			content = m.renderStreamOutput()
+		} else {
+			content = lipgloss.NewStyle().Padding(2).Render(m.spinner.View() + " 正在调用 AI 分析变更...")
+		}
 		return lipgloss.JoinVertical(lipgloss.Left, header, content, help)
 
 	case phaseAuthorize:
@@ -435,7 +492,13 @@ func (m *CommitFlowModel) View() string {
 	case phaseExecuting:
 		header := phaseHeaderStyle.Width(m.termWidth).Render("  执行工具调用...")
 		help := phaseHelpStyle.Width(m.termWidth).Render("  Ctrl+C 取消")
-		content := lipgloss.NewStyle().Padding(2).Render(m.spinner.View() + " 正在执行...")
+
+		var content string
+		if m.streamThinking.Len() > 0 || m.streamContent.Len() > 0 {
+			content = m.renderStreamOutput()
+		} else {
+			content = lipgloss.NewStyle().Padding(2).Render(m.spinner.View() + " 正在执行...")
+		}
 		return lipgloss.JoinVertical(lipgloss.Left, header, content, help)
 
 	case phaseResult:
@@ -459,12 +522,57 @@ func (m *CommitFlowModel) View() string {
 	return ""
 }
 
+func (m *CommitFlowModel) renderStreamOutput() string {
+	w := m.termWidth
+	if w == 0 {
+		w = 80
+	}
+	contentW := w - 4
+
+	var sections []string
+
+	if m.streamThinking.Len() > 0 {
+		thinkingText := m.streamThinking.String()
+		thinkingBox := lipgloss.NewStyle().
+			Border(lipgloss.RoundedBorder()).
+			BorderForeground(lipgloss.Color("241")).
+			Padding(1, 2).
+			Width(contentW).
+			Render(thinkingText)
+		sections = append(sections, thinkingBox)
+	}
+
+	if m.streamContent.Len() > 0 {
+		contentText := m.streamContent.String()
+		contentBox := lipgloss.NewStyle().
+			Border(lipgloss.RoundedBorder()).
+			BorderForeground(lipgloss.Color("63")).
+			Padding(1, 2).
+			Width(contentW).
+			Render(contentText)
+		sections = append(sections, contentBox)
+	}
+
+	if len(sections) == 0 {
+		return lipgloss.NewStyle().Padding(2).Render(m.spinner.View() + " 正在调用 AI 分析变更...")
+	}
+
+	return lipgloss.NewStyle().Padding(1).Render(lipgloss.JoinVertical(lipgloss.Left, sections...))
+}
+
 func (m *CommitFlowModel) renderAuthorizeView() string {
 	w := m.termWidth
 	if w == 0 {
 		w = 80
 	}
 	maxW := min(w-4, 90)
+
+	var sections []string
+
+	// Show streaming content (LLM thinking + commit message)
+	if m.streamThinking.Len() > 0 || m.streamContent.Len() > 0 {
+		sections = append(sections, m.renderStreamOutput())
+	}
 
 	var items []string
 	for i, tc := range m.pendingCalls {
@@ -488,13 +596,13 @@ func (m *CommitFlowModel) renderAuthorizeView() string {
 	}
 
 	toastContent := strings.Join(items, "\n")
-
 	toastTitle := toastTitleStyle.Render("  AI 请求执行工具调用")
 	toastBody := toastStyle.Width(maxW).Render(toastContent)
+	sections = append(sections, toastTitle+"\n"+toastBody)
 
 	help := phaseHelpStyle.Width(w).Render("  Y/Enter 授权执行 │ N 拒绝并取消 │ Ctrl+C 退出")
 
-	return lipgloss.JoinVertical(lipgloss.Left, toastTitle, "\n"+toastBody+"\n", help)
+	return lipgloss.JoinVertical(lipgloss.Left, sections...) + "\n" + help
 }
 
 func (m *CommitFlowModel) GetResult() CommitFlowResult {
