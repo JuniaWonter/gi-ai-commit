@@ -84,17 +84,24 @@ func GetChangedFiles() ([]FileChange, error) {
 }
 
 func GetFileDiff(filePath string) (string, error) {
-	cmd := exec.Command("git", "diff", "--cached", "--", filePath)
-	output, err := cmd.Output()
+	gitRoot, err := getGitRoot()
 	if err != nil {
-		cmd = exec.Command("git", "diff", "--", filePath)
-		output, err = cmd.Output()
-		if err != nil {
-			return "", fmt.Errorf("获取文件 diff 失败：%w", err)
-		}
+		return "", fmt.Errorf("获取 git 根目录失败：%w", err)
 	}
 
-	diff := strings.TrimSpace(string(output))
+	cmd := exec.Command("git", "diff", "--cached", "--", filePath)
+	cmd.Dir = gitRoot
+	cachedOutput, _ := cmd.Output()
+
+	cmd = exec.Command("git", "diff", "--", filePath)
+	cmd.Dir = gitRoot
+	unstagedOutput, err := cmd.Output()
+	if err != nil {
+		return "", fmt.Errorf("获取文件 diff 失败：%w", err)
+	}
+
+	diff := strings.TrimSpace(string(cachedOutput)) + "\n" + strings.TrimSpace(string(unstagedOutput))
+	diff = strings.TrimSpace(diff)
 	if diff == "" {
 		return "", fmt.Errorf("文件 %s 没有变更", filePath)
 	}
