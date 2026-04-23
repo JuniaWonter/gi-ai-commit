@@ -109,15 +109,10 @@ func RunCommit(opts CommitOptions) error {
 	}
 
 	if !result.Success {
-		if result.Error == "用户取消操作" || result.Error == "未选择任何文件" || result.Error == "用户取消提交，已恢复暂存状态" {
+		if result.Error == "用户取消操作" || result.Error == "未选择任何文件" || result.Error == "用户取消提交" {
 			return fmt.Errorf("用户取消提交")
 		}
 		return fmt.Errorf("%s", result.Error)
-	}
-
-	selectedFiles := result.SelectedFiles
-	if len(selectedFiles) == 0 {
-		return fmt.Errorf("未选择任何文件")
 	}
 
 	fmt.Println("📊 更新计数...")
