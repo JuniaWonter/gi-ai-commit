@@ -10,7 +10,6 @@ import (
 	"github.com/oliver/git-ai-commit/internal/counter"
 	"github.com/oliver/git-ai-commit/internal/description"
 	"github.com/oliver/git-ai-commit/internal/diff"
-	"github.com/oliver/git-ai-commit/internal/git"
 	"github.com/oliver/git-ai-commit/internal/loading"
 	"github.com/oliver/git-ai-commit/internal/project"
 	"github.com/oliver/git-ai-commit/tui"
@@ -33,36 +32,9 @@ func RunCommit(opts CommitOptions) error {
 	if err != nil {
 		return fmt.Errorf("获取变更文件失败：%w", err)
 	}
-
 	if len(files) == 0 {
 		return fmt.Errorf("没有变更的文件")
 	}
-
-	selectedFiles, err := tui.SelectFiles(files)
-	if err != nil {
-		return fmt.Errorf("选择文件失败：%w", err)
-	}
-
-	if len(selectedFiles) == 0 {
-		return fmt.Errorf("未选择任何文件")
-	}
-
-	fmt.Println("📦 暂存文件...")
-	if err := diff.StageFiles(selectedFiles); err != nil {
-		return err
-	}
-
-	success := false
-	defer func() {
-		if !success && !opts.DryRun {
-			fmt.Println("🔄 回滚暂存的文件...")
-			if err := resetStagedFiles(selectedFiles); err != nil {
-				fmt.Printf("⚠️  回滚失败: %v\n", err)
-			} else {
-				fmt.Println("✅ 已回滚")
-			}
-		}
-	}()
 
 	fmt.Println("⚙️  加载配置...")
 	cfg, err := config.Load()
@@ -83,7 +55,7 @@ func RunCommit(opts CommitOptions) error {
 		MaxCompactDiffFiles: cfg.DiffPrompt.MaxCompactDiffFiles,
 	}, gitRoot)
 
-	payloads, err := diffProcessor.BuildPayloadsForFiles(selectedFiles)
+	payloads, err := diffProcessor.BuildPayloadsForFiles(nil)
 	if err != nil {
 		return fmt.Errorf("获取代码变更失败：%w", err)
 	}
@@ -95,7 +67,13 @@ func RunCommit(opts CommitOptions) error {
 	diffMode := payloads[0].Mode
 
 	if strings.TrimSpace(diffContent) == "" {
-		return fmt.Errorf("选中的文件没有实际变更")
+		return fmt.Errorf("没有实际变更")
+	}
+
+	fmt.Println("📋 检查仓库描述...")
+	desc, _, err := handleDescription(diffContent, cfg)
+	if err != nil {
+		return fmt.Errorf("处理描述失败：%w", err)
 	}
 
 	fmt.Println("🤖 初始化 AI 客户端...")
@@ -117,42 +95,29 @@ func RunCommit(opts CommitOptions) error {
 		return fmt.Errorf("初始化 AI 客户端失败：%w", err)
 	}
 
-	fmt.Println("📋 检查仓库描述...")
-	desc, _, err := handleDescription(client, diffContent, selectedFiles, cfg)
+	fmt.Println("🚀 进入交互界面...")
+	result, err := tui.RunCommitFlow(files, tui.CommitFlowOptions{
+		AutoConfirm: opts.AutoConfirm,
+		DryRun:      opts.DryRun,
+		Desc:        desc,
+		DiffContent: diffContent,
+		DiffMode:    diffMode,
+		Client:      client,
+	})
 	if err != nil {
-		return fmt.Errorf("处理描述失败：%w", err)
+		return fmt.Errorf("TUI 运行失败：%w", err)
 	}
 
-	conventionInfo := git.DetectConventions()
-
-	fmt.Println("🤖 生成并提交 commit...")
-	if diffMode != "完整 diff" {
-		fmt.Printf("ℹ️  变更较大，已使用 %s 模式\n", diffMode)
-	}
-
-	spinner := loading.New("正在生成并提交 commit...")
-	spinner.Start()
-	commitMessage, toolResults, err := client.CommitWithRetry(diffContent, desc, conventionInfo, 3)
-	spinner.Stop("处理完成")
-
-	if err != nil {
-		for _, tr := range toolResults {
-			fmt.Printf("  工具 %s → %s\n", tr.ToolName, truncateString(tr.Result, 200))
+	if !result.Success {
+		if result.Error == "用户取消操作" || result.Error == "未选择任何文件" || result.Error == "用户取消提交，已恢复暂存状态" {
+			return fmt.Errorf("用户取消提交")
 		}
-		return fmt.Errorf("提交失败：%w", err)
+		return fmt.Errorf("%s", result.Error)
 	}
 
-	fmt.Println("\n📝 最终 commit message:")
-	fmt.Println(strings.Repeat("─", 50))
-	for _, line := range strings.Split(commitMessage, "\n") {
-		fmt.Println(line)
-	}
-	fmt.Println(strings.Repeat("─", 50))
-
-	if opts.DryRun {
-		fmt.Println("🔍 Dry-run 模式，不执行提交")
-		success = true
-		return nil
+	selectedFiles := result.SelectedFiles
+	if len(selectedFiles) == 0 {
+		return fmt.Errorf("未选择任何文件")
 	}
 
 	fmt.Println("📊 更新计数...")
@@ -161,7 +126,6 @@ func RunCommit(opts CommitOptions) error {
 	}
 
 	fmt.Println("✅ 提交成功!")
-	success = true
 	return nil
 }
 
@@ -170,7 +134,7 @@ func isGitRepo() bool {
 	return cmd.Run() == nil
 }
 
-func handleDescription(client *ai.Client, diffContent string, files []string, cfg *config.Config) (string, bool, error) {
+func handleDescription(diffContent string, cfg *config.Config) (string, bool, error) {
 	exists, err := description.Exists()
 	if err != nil {
 		return "", false, err
@@ -193,7 +157,22 @@ func handleDescription(client *ai.Client, diffContent string, files []string, cf
 		return "", false, err
 	}
 
-	fileInfo, err := project.GetFileSummary(projRoot, files)
+	fileInfo, err := project.GetFileSummary(projRoot, nil)
+	if err != nil {
+		return "", false, err
+	}
+
+	modelCfg, err := cfg.GetModelConfig(cfg.AI.DefaultModel)
+	if err != nil {
+		return "", false, err
+	}
+
+	client, err := ai.NewClient(ai.Config{
+		APIKey:  modelCfg.APIKey,
+		Model:   modelCfg.Model,
+		BaseURL: modelCfg.BaseURL,
+		Timeout: modelCfg.GetTimeout(),
+	})
 	if err != nil {
 		return "", false, err
 	}
@@ -247,15 +226,6 @@ func handleDescription(client *ai.Client, diffContent string, files []string, cf
 	return desc, true, nil
 }
 
-var ErrUserCancelled = fmt.Errorf("用户取消提交")
-
-func truncateString(s string, maxLen int) string {
-	if len(s) <= maxLen {
-		return s
-	}
-	return s[:maxLen] + "..."
-}
-
 func getProjectRoot() (string, error) {
 	cmd := exec.Command("git", "rev-parse", "--show-toplevel")
 	output, err := cmd.Output()
@@ -263,20 +233,4 @@ func getProjectRoot() (string, error) {
 		return "", fmt.Errorf("获取项目根目录失败：%w", err)
 	}
 	return strings.TrimSpace(string(output)), nil
-}
-
-func resetStagedFiles(files []string) error {
-	if len(files) == 0 {
-		return nil
-	}
-
-	gitRoot, err := getProjectRoot()
-	if err != nil {
-		return err
-	}
-
-	args := append([]string{"reset"}, files...)
-	cmd := exec.Command("git", args...)
-	cmd.Dir = gitRoot
-	return cmd.Run()
 }
