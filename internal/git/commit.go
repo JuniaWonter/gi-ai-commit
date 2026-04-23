@@ -90,6 +90,30 @@ func parseCommitHash(output string) string {
 	return ""
 }
 
+func ResetLastCommit() CommitResult {
+	gitRoot, err := getGitRoot()
+	if err != nil {
+		return CommitResult{Success: false, Error: err.Error()}
+	}
+
+	cmd := exec.Command("git", "reset", "--soft", "HEAD~1")
+	cmd.Dir = gitRoot
+
+	var stderr bytes.Buffer
+	cmd.Stderr = &stderr
+
+	err = cmd.Run()
+	if err != nil {
+		return CommitResult{
+			Success: false,
+			Error:   err.Error(),
+			Stderr:  stderr.String(),
+		}
+	}
+
+	return CommitResult{Success: true}
+}
+
 func getGitRoot() (string, error) {
 	cmd := exec.Command("git", "rev-parse", "--show-toplevel")
 	output, err := cmd.Output()

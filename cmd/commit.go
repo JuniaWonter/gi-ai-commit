@@ -168,7 +168,9 @@ func RunCommit(opts CommitOptions) error {
 
 	fmt.Println("\n📝 最终 commit message:")
 	fmt.Println(strings.Repeat("─", 50))
-	fmt.Println(commitMessage)
+	for _, line := range strings.Split(commitMessage, "\n") {
+		fmt.Println(line)
+	}
 	fmt.Println(strings.Repeat("─", 50))
 
 	if !opts.AutoConfirm && !opts.DryRun {
@@ -181,22 +183,28 @@ func RunCommit(opts CommitOptions) error {
 
 		input = strings.TrimSpace(strings.ToLower(input))
 		if input == "n" || input == "no" {
-			git.CommitAmend("chore: 回滚 AI 提交")
+			fmt.Println("🔄 撤销提交，恢复暂存状态...")
+			resetResult := git.ResetLastCommit()
+			if !resetResult.Success {
+				return fmt.Errorf("撤销提交失败：%s", resetResult.Stderr)
+			}
+			fmt.Println("✅ 已撤销提交，文件仍处于暂存状态")
 			return errUserCancelled
 		}
 		if input == "e" || input == "edit" {
-			fmt.Print("输入新的 commit message: ")
-			newMsg, err := reader.ReadString('\n')
+			newMsg, err := tui.EditCommitMessage(commitMessage)
 			if err != nil {
-				return fmt.Errorf("读取输入失败：%w", err)
+				return fmt.Errorf("编辑失败：%w", err)
 			}
-			newMsg = strings.TrimSpace(newMsg)
-			if newMsg != "" {
+			if newMsg == "" {
+				fmt.Println("未修改，保留原提交")
+			} else {
 				amendResult := git.CommitAmend(newMsg)
 				if !amendResult.Success {
 					return fmt.Errorf("修改提交失败：%s", amendResult.Stderr)
 				}
 				commitMessage = newMsg
+				fmt.Println("✅ commit message 已更新")
 			}
 		}
 	}
