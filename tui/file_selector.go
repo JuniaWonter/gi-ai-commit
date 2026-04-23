@@ -9,6 +9,7 @@ import (
 	tea "github.com/charmbracelet/bubbletea"
 	"github.com/charmbracelet/lipgloss"
 	"github.com/oliver/git-ai-commit/internal/diff"
+	"github.com/oliver/git-ai-commit/internal/git"
 )
 
 var (
@@ -102,6 +103,16 @@ type diffLoadedMsg struct {
 	ignoreWS  bool
 }
 
+type gitignoreAddedMsg struct {
+	entry string
+	err   error
+}
+
+type filesRefreshedMsg struct {
+	files []diff.FileChange
+	err   error
+}
+
 type FileSelector struct {
 	files       []diff.FileChange
 	cursor      int
@@ -128,6 +139,7 @@ type FileSelector struct {
 	removedLines int
 	hunkPositions []int
 	lineTypes   []string
+	gitignoreMsg string
 }
 
 func NewFileSelector(files []diff.FileChange) *FileSelector {
@@ -186,6 +198,44 @@ func (f *FileSelector) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		f.leftVP.GotoTop()
 		f.rightVP.GotoTop()
 		f.showDiff = true
+		return f, nil
+
+	case gitignoreAddedMsg:
+		if msg.err != nil {
+			f.gitignoreMsg = lipgloss.NewStyle().Foreground(lipgloss.Color("1")).Render(fmt.Sprintf("✗ 添加 .gitignore 失败：%v", msg.err))
+		} else {
+			f.gitignoreMsg = lipgloss.NewStyle().Foreground(lipgloss.Color("2")).Render(fmt.Sprintf("✓ 已添加 %s 到 .gitignore，刷新文件列表...", msg.entry))
+			return f, refreshFilesCmd()
+		}
+		return f, nil
+
+	case filesRefreshedMsg:
+		if msg.err != nil {
+			f.gitignoreMsg = lipgloss.NewStyle().Foreground(lipgloss.Color("1")).Render(fmt.Sprintf("✗ 刷新文件列表失败：%v", msg.err))
+		} else {
+			oldCursorPath := ""
+			if len(f.files) > 0 && f.cursor < len(f.files) {
+				oldCursorPath = f.files[f.cursor].Path
+			}
+			f.files = msg.files
+			f.selected = make(map[int]bool)
+			f.cursor = 0
+			for i, file := range f.files {
+				f.selected[i] = file.Selected
+			}
+			if oldCursorPath != "" {
+				for i, file := range f.files {
+					if file.Path == oldCursorPath {
+						f.cursor = i
+						break
+					}
+				}
+			}
+			if f.cursor >= len(f.files) {
+				f.cursor = max(0, len(f.files)-1)
+			}
+			f.gitignoreMsg = ""
+		}
 		return f, nil
 
 	case tea.KeyMsg:
@@ -309,6 +359,12 @@ func (f *FileSelector) handleSelectorKeys(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 			return f, loadDiffCmd(filePath, f.ignoreWS)
 		}
 
+	case "e":
+		if len(f.files) > 0 {
+			entry := f.files[f.cursor].Path
+			return f, addGitignoreCmd(entry)
+		}
+
 	case "s":
 		hasSelected := false
 		for _, v := range f.selected {
@@ -329,6 +385,20 @@ func loadDiffCmd(filePath string, ignoreWS bool) tea.Cmd {
 	return func() tea.Msg {
 		content, raw, err := diff.GetFileDiffFull(filePath, ignoreWS)
 		return diffLoadedMsg{content: content, rawDiff: raw, path: filePath, err: err, ignoreWS: ignoreWS}
+	}
+}
+
+func addGitignoreCmd(entry string) tea.Cmd {
+	return func() tea.Msg {
+		err := git.AddToGitignore(entry)
+		return gitignoreAddedMsg{entry: entry, err: err}
+	}
+}
+
+func refreshFilesCmd() tea.Cmd {
+	return func() tea.Msg {
+		files, err := diff.GetChangedFiles()
+		return filesRefreshedMsg{files: files, err: err}
 	}
 }
 
@@ -822,7 +892,7 @@ func (f *FileSelector) renderSplitView() string {
 func (f *FileSelector) renderFileList() string {
 	var b strings.Builder
 
-	b.WriteString("选择要提交的文件 (↑↓/j/k 移动，Space 选择，A 全选，D 取消，v 查看 diff，S 确认，Q 退出)\n\n")
+	b.WriteString("选择要提交的文件 (↑↓/j/k 移动，Space 选择，A 全选，D 取消，v 查看 diff，e 添加 gitignore，S 确认，Q 退出)\n\n")
 
 	for i, file := range f.files {
 		cursor := " "
@@ -848,6 +918,10 @@ func (f *FileSelector) renderFileList() string {
 
 	b.WriteString("\n")
 	b.WriteString(normalStyle.Render(fmt.Sprintf("已选择：%d/%d", f.countSelected(), len(f.files))))
+
+	if f.gitignoreMsg != "" {
+		b.WriteString("\n" + f.gitignoreMsg)
+	}
 
 	return b.String()
 }

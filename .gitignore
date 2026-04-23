@@ -1,1 +1,9 @@
 git-ai
+
+.lcm/lcm.db
+
+.lcm/lcm.db-shm
+
+.lcm/lcm.db-wal
+
+git-ai-commit
