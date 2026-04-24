@@ -8,6 +8,7 @@ import (
 	"github.com/oliver/git-ai-commit/internal/ai"
 	"github.com/oliver/git-ai-commit/internal/config"
 	"github.com/oliver/git-ai-commit/internal/counter"
+	"github.com/oliver/git-ai-commit/internal/debug"
 	"github.com/oliver/git-ai-commit/internal/description"
 	"github.com/oliver/git-ai-commit/internal/diff"
 	"github.com/oliver/git-ai-commit/internal/loading"
@@ -22,6 +23,7 @@ type CommitOptions struct {
 }
 
 func RunCommit(opts CommitOptions) error {
+	debug.Logf("cmd.RunCommit start autoConfirm=%v dryRun=%v model=%s", opts.AutoConfirm, opts.DryRun, opts.Model)
 	fmt.Println("📊 检查 Git 仓库...")
 	if !isGitRepo() {
 		return fmt.Errorf("当前目录不是 Git 仓库")
@@ -35,6 +37,7 @@ func RunCommit(opts CommitOptions) error {
 	if len(files) == 0 {
 		return fmt.Errorf("没有变更的文件")
 	}
+	debug.Logf("cmd.RunCommit changed files=%d", len(files))
 
 	fmt.Println("⚙️  加载配置...")
 	cfg, err := config.Load()
@@ -42,38 +45,9 @@ func RunCommit(opts CommitOptions) error {
 		return fmt.Errorf("加载配置失败：%w", err)
 	}
 
-	fmt.Println("📊 获取代码变更...")
 	gitRoot, err := getProjectRoot()
 	if err != nil {
 		return fmt.Errorf("获取项目根目录失败：%w", err)
-	}
-
-	diffProcessor := diff.NewDiffProcessor(diff.DiffPromptConfig{
-		MaxFullDiffBytes:    cfg.DiffPrompt.MaxFullDiffBytes,
-		MaxCompactDiffBytes: cfg.DiffPrompt.MaxCompactDiffBytes,
-		MaxPerFileDiffBytes: cfg.DiffPrompt.MaxPerFileDiffBytes,
-		MaxCompactDiffFiles: cfg.DiffPrompt.MaxCompactDiffFiles,
-	}, gitRoot)
-
-	payloads, err := diffProcessor.BuildPayloadsForFiles(nil)
-	if err != nil {
-		return fmt.Errorf("获取代码变更失败：%w", err)
-	}
-	if len(payloads) == 0 {
-		return fmt.Errorf("没有检测到任何代码变更")
-	}
-
-	diffContent := payloads[0].Content
-	diffMode := payloads[0].Mode
-
-	if strings.TrimSpace(diffContent) == "" {
-		return fmt.Errorf("没有实际变更")
-	}
-
-	fmt.Println("📋 检查仓库描述...")
-	desc, _, err := handleDescription(diffContent, cfg)
-	if err != nil {
-		return fmt.Errorf("处理描述失败：%w", err)
 	}
 
 	fmt.Println("🤖 初始化 AI 客户端...")
@@ -95,18 +69,32 @@ func RunCommit(opts CommitOptions) error {
 		return fmt.Errorf("初始化 AI 客户端失败：%w", err)
 	}
 
+	fmt.Println("📋 检查仓库描述...")
+	desc, _, err := handleDescription(cfg, client, gitRoot)
+	if err != nil {
+		return fmt.Errorf("处理描述失败：%w", err)
+	}
+
+	diffCfg := diff.DiffPromptConfig{
+		MaxFullDiffBytes:    cfg.DiffPrompt.MaxFullDiffBytes,
+		MaxCompactDiffBytes: cfg.DiffPrompt.MaxCompactDiffBytes,
+		MaxPerFileDiffBytes: cfg.DiffPrompt.MaxPerFileDiffBytes,
+		MaxCompactDiffFiles: cfg.DiffPrompt.MaxCompactDiffFiles,
+	}
+
 	fmt.Println("🚀 进入交互界面...")
 	result, err := tui.RunCommitFlow(files, tui.CommitFlowOptions{
 		AutoConfirm: opts.AutoConfirm,
 		DryRun:      opts.DryRun,
 		Desc:        desc,
-		DiffContent: diffContent,
-		DiffMode:    diffMode,
+		DiffCfg:     diffCfg,
+		GitRoot:     gitRoot,
 		Client:      client,
 	})
 	if err != nil {
 		return fmt.Errorf("TUI 运行失败：%w", err)
 	}
+	debug.Logf("cmd.RunCommit flow result success=%v selectedFiles=%d commitHash=%s", result.Success, len(result.SelectedFiles), result.CommitHash)
 
 	if !result.Success {
 		return fmt.Errorf("用户取消提交")
@@ -129,7 +117,7 @@ func isGitRepo() bool {
 	return cmd.Run() == nil
 }
 
-func handleDescription(diffContent string, cfg *config.Config) (string, bool, error) {
+func handleDescription(cfg *config.Config, client *ai.Client, projRoot string) (string, bool, error) {
 	exists, err := description.Exists()
 	if err != nil {
 		return "", false, err
@@ -142,9 +130,14 @@ func handleDescription(diffContent string, cfg *config.Config) (string, bool, er
 
 	const updateInterval = 10
 
-	projRoot, err := getProjectRoot()
-	if err != nil {
-		return "", false, err
+	// 只在首次或到达更新间隔时才需要 diff 和 AI 调用
+	needsUpdate := !exists || description.ShouldUpdate(count, updateInterval)
+	if !needsUpdate {
+		desc, err := description.Read()
+		if err != nil {
+			return "", false, err
+		}
+		return desc, false, nil
 	}
 
 	projectInfo, err := project.GetSummary(projRoot)
@@ -157,25 +150,12 @@ func handleDescription(diffContent string, cfg *config.Config) (string, bool, er
 		return "", false, err
 	}
 
-	modelCfg, err := cfg.GetModelConfig(cfg.AI.DefaultModel)
-	if err != nil {
-		return "", false, err
-	}
-
-	client, err := ai.NewClient(ai.Config{
-		APIKey:  modelCfg.APIKey,
-		Model:   modelCfg.Model,
-		BaseURL: modelCfg.BaseURL,
-		Timeout: modelCfg.GetTimeout(),
-	})
-	if err != nil {
-		return "", false, err
-	}
+	// 获取少量 diff 辅助 AI 理解项目变化
+	stagedDiff, _ := diff.GetStagedDiff()
+	limitedDiff := diff.LimitDiffLines(stagedDiff, 100)
 
 	if !exists {
 		fmt.Println("📝 首次提交，生成仓库描述...")
-		limitedDiff := diff.LimitDiffLines(diffContent, 100)
-
 		spinner := loading.New("正在生成项目描述...")
 		spinner.Start()
 		desc, err := client.GenerateDescription(projectInfo, fileInfo, limitedDiff)
@@ -183,41 +163,27 @@ func handleDescription(diffContent string, cfg *config.Config) (string, bool, er
 		if err != nil {
 			return "", false, fmt.Errorf("生成描述失败：%w", err)
 		}
-
 		if err := description.Write(desc); err != nil {
 			return "", false, fmt.Errorf("保存描述失败：%w", err)
 		}
-
 		fmt.Println("✅ 仓库描述已创建")
 		return desc, true, nil
 	}
 
-	if description.ShouldUpdate(count, updateInterval) {
-		fmt.Println("📝 达到更新间隔，更新仓库描述...")
-		limitedDiff := diff.LimitDiffLines(diffContent, 100)
-
-		spinner := loading.New("正在更新项目描述...")
-		spinner.Start()
-		desc, err := client.GenerateDescription(projectInfo, fileInfo, limitedDiff)
-		spinner.Stop("更新完成")
-		if err != nil {
-			desc, _ = description.Read()
-			return desc, true, nil
-		}
-
-		if err := description.Write(desc); err != nil {
-			return "", false, fmt.Errorf("更新描述失败：%w", err)
-		}
-
-		fmt.Println("✅ 仓库描述已更新")
+	fmt.Println("📝 达到更新间隔，更新仓库描述...")
+	spinner := loading.New("正在更新项目描述...")
+	spinner.Start()
+	desc, err := client.GenerateDescription(projectInfo, fileInfo, limitedDiff)
+	spinner.Stop("更新完成")
+	if err != nil {
+		// 更新失败时降级读取旧描述，不中断流程
+		desc, _ = description.Read()
 		return desc, true, nil
 	}
-
-	desc, err := description.Read()
-	if err != nil {
-		return "", false, err
+	if err := description.Write(desc); err != nil {
+		return "", false, fmt.Errorf("更新描述失败：%w", err)
 	}
-
+	fmt.Println("✅ 仓库描述已更新")
 	return desc, true, nil
 }
 
