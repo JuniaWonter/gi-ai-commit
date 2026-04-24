@@ -7,3 +7,7 @@ git-ai
 .lcm/lcm.db-wal
 
 git-ai-commit
+
+.firecrawl/git-commit-authoritative.json
+
+.firecrawl/git-commit-conventions.json
