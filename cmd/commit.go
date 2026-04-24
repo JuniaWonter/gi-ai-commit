@@ -109,10 +109,7 @@ func RunCommit(opts CommitOptions) error {
 	}
 
 	if !result.Success {
-		if result.Error == "用户取消操作" || result.Error == "未选择任何文件" || result.Error == "用户取消提交" {
-			return fmt.Errorf("用户取消提交")
-		}
-		return fmt.Errorf("%s", result.Error)
+		return fmt.Errorf("用户取消提交")
 	}
 
 	fmt.Println("📊 更新计数...")
@@ -121,6 +118,9 @@ func RunCommit(opts CommitOptions) error {
 	}
 
 	fmt.Println("✅ 提交成功!")
+	if result.TotalTokens > 0 {
+		fmt.Printf("   Token 消耗: prompt=%d  completion=%d  total=%d\n", result.PromptTokens, result.CompletionTokens, result.TotalTokens)
+	}
 	return nil
 }
 
