@@ -130,14 +130,19 @@ func (p PendingToolCall) ArgString(key string) string {
 }
 
 type CommitSession struct {
-	client      *Client
-	messages    []openai.ChatCompletionMessage
-	tools       []openai.Tool
-	retryCount  int
-	maxRetries  int
-	toolResults []ToolCallResult
-	commitMsg   string
-	streaming   bool
+	client             *Client
+	messages           []openai.ChatCompletionMessage
+	tools              []openai.Tool
+	retryCount         int
+	maxRetries         int
+	loopCount          int
+	maxLoops           int
+	toolResults        []ToolCallResult
+	commitMsg          string
+	streaming          bool
+	promptTokens       int
+	completionTokens   int
+	totalTokens        int
 }
 
 type StreamChunk struct {
@@ -147,10 +152,13 @@ type StreamChunk struct {
 }
 
 type CommitResult struct {
-	Success     bool
-	CommitMsg   string
-	ToolResults []ToolCallResult
-	Error       error
+	Success          bool
+	CommitMsg        string
+	ToolResults      []ToolCallResult
+	Error            error
+	PromptTokens     int
+	CompletionTokens int
+	TotalTokens      int
 }
 
 func (c *Client) StartCommitSession(diffContent, description string, conventionInfo git.ConventionInfo, maxRetries int) (*CommitSession, error) {
@@ -167,6 +175,7 @@ func (c *Client) StartCommitSession(diffContent, description string, conventionI
 		messages:   messages,
 		tools:      buildOpenAITools(),
 		maxRetries: maxRetries,
+		maxLoops:   10,
 	}
 
 	return sess, nil
@@ -175,11 +184,11 @@ func (c *Client) StartCommitSession(diffContent, description string, conventionI
 func (s *CommitSession) StreamAI(send func(chunk StreamChunk)) ([]PendingToolCall, error) {
 	s.streaming = true
 	req := openai.ChatCompletionRequest{
-		Model:       s.client.config.Model,
-		Messages:    s.messages,
-		Tools:       s.tools,
-		Temperature: 0.3,
-		Stream:      true,
+		Model:          s.client.config.Model,
+		Messages:       s.messages,
+		Tools:          s.tools,
+		Temperature:    0.3,
+		Stream:         true,
 	}
 
 	ctx, cancel := context.WithTimeout(context.Background(), s.client.config.Timeout)
@@ -199,6 +208,13 @@ func (s *CommitSession) StreamAI(send func(chunk StreamChunk)) ([]PendingToolCal
 		resp, err := stream.Recv()
 		if err != nil {
 			break
+		}
+
+		// Accumulate usage from stream chunks
+		if resp.Usage != nil {
+			s.promptTokens += resp.Usage.PromptTokens
+			s.completionTokens += resp.Usage.CompletionTokens
+			s.totalTokens += resp.Usage.TotalTokens
 		}
 
 		if len(resp.Choices) == 0 {
@@ -281,42 +297,48 @@ func (s *CommitSession) StreamAI(send func(chunk StreamChunk)) ([]PendingToolCal
 	return pending, nil
 }
 
-func (s *CommitSession) ExecuteAndResume(authorized []bool) ([]PendingToolCall, error) {
-	return s.ExecuteAndResumeWithStream(authorized, func(chunk StreamChunk) {})
+func (s *CommitSession) ExecuteAndResume(pending []PendingToolCall, authorized []bool) ([]PendingToolCall, error) {
+	return s.ExecuteAndResumeWithStream(pending, authorized, func(chunk StreamChunk) {})
 }
 
-func (s *CommitSession) ExecuteAndResumeWithStream(authorized []bool, send func(chunk StreamChunk)) ([]PendingToolCall, error) {
+func (s *CommitSession) ExecuteAndResumeWithStream(pending []PendingToolCall, authorized []bool, send func(chunk StreamChunk)) ([]PendingToolCall, error) {
+	if s.loopCount > s.maxLoops {
+		return nil, fmt.Errorf("工具调用轮次过多（%d 次），AI 可能陷入循环，请手动处理", s.loopCount)
+	}
 	if s.retryCount > s.maxRetries {
 		classified := git.ClassifyCommitError(findLastStderr(s.toolResults))
 		if classified.Category == git.ErrorUnrecoverable {
 			return nil, fmt.Errorf("不可恢复的错误：%s\n建议：%s", classified.Message, classified.Suggestion)
 		}
-		return nil, fmt.Errorf("重试次数已达上限（%d 次），请手动处理", s.maxRetries)
+		return nil, fmt.Errorf("提交失败次数达上限（%d 次），请手动处理", s.maxRetries)
 	}
 
 	for i, auth := range authorized {
+		if i >= len(pending) {
+			break
+		}
+		tc := pending[i]
 		if !auth {
 			s.messages = append(s.messages, openai.ChatCompletionMessage{
 				Role:       openai.ChatMessageRoleTool,
 				Content:    "用户拒绝了此工具调用",
-				ToolCallID: s.messages[len(s.messages)-1].ToolCalls[i].ID,
+				ToolCallID: tc.ID,
 			})
 			continue
 		}
 
-		tc := s.messages[len(s.messages)-1].ToolCalls[i]
-		result := executeToolCall(tc.Function.Name, tc.Function.Arguments)
+		result := executeToolCall(tc.Name, tc.ArgsJSON)
 		s.toolResults = append(s.toolResults, ToolCallResult{
-			ToolName: tc.Function.Name,
-			Args:     json.RawMessage(tc.Function.Arguments),
+			ToolName: tc.Name,
+			Args:     json.RawMessage(tc.ArgsJSON),
 			Result:   result,
 		})
 
-		if tc.Function.Name == "git_commit" || tc.Function.Name == "git_commit_amend" {
+		if tc.Name == "git_commit" || tc.Name == "git_commit_amend" {
 			var args struct {
 				Message string `json:"message"`
 			}
-			json.Unmarshal(json.RawMessage(tc.Function.Arguments), &args)
+			json.Unmarshal(json.RawMessage(tc.ArgsJSON), &args)
 			s.commitMsg = args.Message
 		}
 
@@ -328,10 +350,14 @@ func (s *CommitSession) ExecuteAndResumeWithStream(authorized []bool, send func(
 	}
 
 	committed := false
+	commitFailed := false
 	for _, tr := range s.toolResults {
-		if (tr.ToolName == "git_commit" || tr.ToolName == "git_commit_amend") && strings.Contains(tr.Result, "SUCCESS") {
-			committed = true
-			break
+		if tr.ToolName == "git_commit" || tr.ToolName == "git_commit_amend" {
+			if strings.Contains(tr.Result, "SUCCESS") {
+				committed = true
+			} else if strings.Contains(tr.Result, "FAILED") {
+				commitFailed = true
+			}
 		}
 	}
 
@@ -339,27 +365,62 @@ func (s *CommitSession) ExecuteAndResumeWithStream(authorized []bool, send func(
 		return nil, nil
 	}
 
-	s.retryCount++
+	s.loopCount++
+	if commitFailed {
+		s.retryCount++
+	}
 	return s.StreamAI(send)
 }
 
 func (s *CommitSession) GetResult() CommitResult {
 	if s.commitMsg != "" {
 		return CommitResult{
-			Success:     true,
-			CommitMsg:   s.commitMsg,
-			ToolResults: s.toolResults,
+			Success:          true,
+			CommitMsg:        s.commitMsg,
+			ToolResults:      s.toolResults,
+			PromptTokens:     s.promptTokens,
+			CompletionTokens: s.completionTokens,
+			TotalTokens:      s.totalTokens,
 		}
 	}
 	return CommitResult{
-		Success:     false,
-		ToolResults: s.toolResults,
-		Error:       fmt.Errorf("提交未完成"),
+		Success:          false,
+		ToolResults:      s.toolResults,
+		Error:            fmt.Errorf("提交未完成"),
+		PromptTokens:     s.promptTokens,
+		CompletionTokens: s.completionTokens,
+		TotalTokens:      s.totalTokens,
 	}
 }
 
 func executeToolCall(name, argsJSON string) string {
 	switch name {
+	case "list_tree":
+		var args struct {
+			MaxDepth int `json:"max_depth"`
+		}
+		json.Unmarshal(json.RawMessage(argsJSON), &args)
+		if args.MaxDepth <= 0 {
+			args.MaxDepth = 3
+		}
+		tree := git.GetProjectTree(args.MaxDepth)
+		return fmt.Sprintf("PROJECT TREE (depth=%d):\n%s", args.MaxDepth, tree)
+
+	case "read_file":
+		var args struct {
+			Path      string `json:"path"`
+			StartLine int    `json:"start_line"`
+			EndLine   int    `json:"end_line"`
+		}
+		if err := json.Unmarshal(json.RawMessage(argsJSON), &args); err != nil {
+			return fmt.Sprintf("ERROR: 解析参数失败：%v", err)
+		}
+		content, err := git.ReadFileContent(args.Path, args.StartLine, args.EndLine)
+		if err != nil {
+			return fmt.Sprintf("ERROR: %v", err)
+		}
+		return content
+
 	case "git_commit":
 		var args struct {
 			Message string `json:"message"`
@@ -538,9 +599,12 @@ func buildGeneratePrompt(diffContent, description string) string {
 
 func buildAuthSystemPrompt(conventionInfo git.ConventionInfo) string {
 	var b strings.Builder
-	b.WriteString("你是一个 Git commit message 生成助手。\n")
-	b.WriteString("你的职责是分析代码变更，生成 commit message，并使用工具提交。\n")
-	b.WriteString("每次调用工具前，用户会审核并授权。\n")
+	b.WriteString("你是一个 Git commit message 生成助手，同时具备代码审查能力。\n")
+	b.WriteString("你的职责分两步：\n")
+	b.WriteString("第一步：代码审查 — 分析代码变更，使用 list_tree 了解项目结构，使用 read_file 读取相关文件获取更多上下文，给出审查意见。\n")
+	b.WriteString("第二步：提交代码 — 生成 commit message 并使用 git_commit 工具提交。\n")
+	b.WriteString("list_tree 和 read_file 工具不需要用户授权，会自动执行。\n")
+	b.WriteString("git_commit 和 git_commit_amend 需要用户授权。\n")
 	b.WriteString("如果提交失败，根据错误信息调整后使用 git_commit_amend 修正。\n\n")
 
 	if conventionInfo.HookExists {
@@ -567,11 +631,13 @@ func buildAuthSystemPrompt(conventionInfo git.ConventionInfo) string {
 	}
 
 	b.WriteString("规则：\n")
-	b.WriteString("1. 分析变更后调用 git_commit 工具提交\n")
-	b.WriteString("2. 如果提交失败且错误可恢复，调整后调用 git_commit_amend\n")
-	b.WriteString("3. 如果是不可恢复的错误，不要重试，返回文本说明原因\n")
-	b.WriteString("4. 最多重试 3 次\n")
-	b.WriteString("5. 使用中文\n")
+	b.WriteString("1. 先调用 list_tree 了解项目结构，再分析变更，必要时调用 read_file 读取相关文件进行审查\n")
+	b.WriteString("2. 给出审查意见（潜在问题、改进建议等）\n")
+	b.WriteString("3. 生成 commit message 并调用 git_commit 提交\n")
+	b.WriteString("4. 如果提交失败且错误可恢复，调整后调用 git_commit_amend\n")
+	b.WriteString("5. 如果是不可恢复的错误，不要重试，返回文本说明原因\n")
+	b.WriteString("6. 最多重试 3 次\n")
+	b.WriteString("7. 使用中文\n")
 
 	return b.String()
 }
@@ -579,7 +645,7 @@ func buildAuthSystemPrompt(conventionInfo git.ConventionInfo) string {
 func buildAuthPrompt(diffContent, description string) string {
 	var b strings.Builder
 
-	b.WriteString("请根据以下代码变更生成 commit message 并提交。\n\n")
+	b.WriteString("请根据以下代码变更进行代码审查并提交。\n\n")
 
 	if description != "" {
 		b.WriteString("项目描述：\n")
@@ -591,7 +657,7 @@ func buildAuthPrompt(diffContent, description string) string {
 	b.WriteString(diffContent)
 	b.WriteString("\n\n")
 
-	b.WriteString("请分析变更，调用 git_commit 工具提交。如果需要了解仓库格式，可以调用 git_hook_check 或 git_log_recent。\n")
+	b.WriteString("请先审查变更（建议先调用 list_tree 了解项目结构，再使用 read_file 读取相关文件），给出审查意见，然后调用 git_commit 工具提交。如果需要了解仓库格式，可以调用 git_hook_check 或 git_log_recent。\n")
 
 	return b.String()
 }
