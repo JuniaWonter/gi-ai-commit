@@ -4,6 +4,8 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"os"
+	"strconv"
 	"strings"
 	"time"
 
@@ -143,6 +145,10 @@ type CommitSession struct {
 	promptTokens       int
 	completionTokens   int
 	totalTokens        int
+	readFileCalls      int
+	listTreeCalls      int
+	maxReadFileCalls   int
+	maxListTreeCalls   int
 }
 
 type StreamChunk struct {
@@ -176,6 +182,8 @@ func (c *Client) StartCommitSession(diffContent, description string, conventionI
 		tools:      buildOpenAITools(),
 		maxRetries: maxRetries,
 		maxLoops:   10,
+		maxReadFileCalls: envIntOrDefault("GIT_AI_MAX_READ_FILE_CALLS", 4),
+		maxListTreeCalls: envIntOrDefault("GIT_AI_MAX_LIST_TREE_CALLS", 1),
 	}
 
 	return sess, nil
@@ -327,7 +335,7 @@ func (s *CommitSession) ExecuteAndResumeWithStream(pending []PendingToolCall, au
 			continue
 		}
 
-		result := executeToolCall(tc.Name, tc.ArgsJSON)
+		result := s.executeToolCallWithLimit(tc.Name, tc.ArgsJSON)
 		s.toolResults = append(s.toolResults, ToolCallResult{
 			ToolName: tc.Name,
 			Args:     json.RawMessage(tc.ArgsJSON),
@@ -487,6 +495,34 @@ func executeToolCall(name, argsJSON string) string {
 	default:
 		return fmt.Sprintf("ERROR: 未知工具 %s", name)
 	}
+}
+
+func (s *CommitSession) executeToolCallWithLimit(name, argsJSON string) string {
+	switch name {
+	case "list_tree":
+		if s.listTreeCalls >= s.maxListTreeCalls {
+			return fmt.Sprintf("SKIPPED: list_tree 调用已达上限（%d）", s.maxListTreeCalls)
+		}
+		s.listTreeCalls++
+	case "read_file":
+		if s.readFileCalls >= s.maxReadFileCalls {
+			return fmt.Sprintf("SKIPPED: read_file 调用已达上限（%d）", s.maxReadFileCalls)
+		}
+		s.readFileCalls++
+	}
+	return executeToolCall(name, argsJSON)
+}
+
+func envIntOrDefault(key string, def int) int {
+	v := strings.TrimSpace(os.Getenv(key))
+	if v == "" {
+		return def
+	}
+	n, err := strconv.Atoi(v)
+	if err != nil || n <= 0 {
+		return def
+	}
+	return n
 }
 
 func categoryLabel(cat git.ErrorCategory) string {
