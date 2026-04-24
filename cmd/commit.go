@@ -106,6 +106,13 @@ func RunCommit(opts CommitOptions) error {
 	}
 
 	fmt.Println("✅ 提交成功!")
+	if result.CommitHash != "" {
+		fmt.Printf("   Commit: %s\n", result.CommitHash)
+	}
+	if result.CommitMessage != "" {
+		fmt.Println("   Message:")
+		fmt.Printf("   %s\n", strings.ReplaceAll(result.CommitMessage, "\n", "\n   "))
+	}
 	if result.TotalTokens > 0 {
 		fmt.Printf("   Token 消耗: prompt=%d  completion=%d  total=%d\n", result.PromptTokens, result.CompletionTokens, result.TotalTokens)
 	}
