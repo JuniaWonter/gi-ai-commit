@@ -27,7 +27,7 @@ func ClassifyCommitError(stderr string) ClassifiedError {
 		return ClassifiedError{
 			Category:   ErrorUnrecoverable,
 			Message:    "没有变更可提交",
-			Suggestion: "请先使用 git add 暽存变更",
+			Suggestion: "请先使用 git add 暂存变更",
 			RawStderr:  stderr,
 		}
 	}

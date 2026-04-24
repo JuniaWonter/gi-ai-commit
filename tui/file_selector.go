@@ -2,6 +2,7 @@ package tui
 
 import (
 	"fmt"
+	"os"
 	"strconv"
 	"strings"
 
@@ -379,10 +380,29 @@ func (f *FileSelector) handleSelectorKeys(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 			f.cursor++
 		}
 
-	case " ", "enter":
+	case " ":
 		if len(f.files) > 0 {
 			f.selected[f.cursor] = !f.selected[f.cursor]
 			f.files[f.cursor].Selected = f.selected[f.cursor]
+		}
+
+	case "enter":
+		hasSelected := false
+		for _, v := range f.selected {
+			if v {
+				hasSelected = true
+				break
+			}
+		}
+		if hasSelected {
+			f.done = true
+			return f, nil
+		}
+		if len(f.files) > 0 {
+			f.selected[f.cursor] = true
+			f.files[f.cursor].Selected = true
+			f.done = true
+			return f, nil
 		}
 
 	case "a":
@@ -971,7 +991,7 @@ func (f *FileSelector) renderSplitView() string {
 func (f *FileSelector) renderFileList() string {
 	var b strings.Builder
 
-	b.WriteString("选择要提交的文件 (↑↓/j/k 移动，Space 选择，A 全选，D 取消，v 查看 diff，e 添加 gitignore，S 确认，Q 退出)\n\n")
+	b.WriteString("选择要提交的文件 (↑↓/j/k 移动，Space 选择，Enter 确认，A 全选，D 取消，v 查看 diff，e 添加 gitignore，S 确认，Q 退出)\n\n")
 
 	for i, file := range f.files {
 		cursor := " "
@@ -1031,7 +1051,12 @@ func (f *FileSelector) IsCancelled() bool {
 
 func SelectFiles(files []diff.FileChange) ([]string, error) {
 	selector := NewFileSelector(files)
-	p := tea.NewProgram(selector, tea.WithAltScreen())
+
+	if os.Getenv("TERM") == "" {
+		os.Setenv("TERM", "dumb")
+	}
+
+	p := tea.NewProgram(selector)
 
 	model, err := p.Run()
 	if err != nil {

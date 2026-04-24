@@ -7,6 +7,27 @@ import (
 	"strings"
 )
 
+// isPathWithinRoot checks if the resolved absolute path is within the git root.
+// Returns the cleaned absolute path or an error if outside root.
+func isPathWithinRoot(root, relPath string) (string, error) {
+	fullPath, err := filepath.Abs(filepath.Join(root, relPath))
+	if err != nil {
+		return "", fmt.Errorf("解析路径失败：%w", err)
+	}
+
+	cleanRoot, err := filepath.Abs(root)
+	if err != nil {
+		return "", fmt.Errorf("解析根目录失败：%w", err)
+	}
+
+	// Ensure the path starts with the git root (with trailing separator to prevent prefix attacks)
+	if !strings.HasPrefix(fullPath, cleanRoot+string(filepath.Separator)) && fullPath != cleanRoot {
+		return "", fmt.Errorf("安全限制：路径 %q 超出 git 根目录 %q，拒绝访问", relPath, cleanRoot)
+	}
+
+	return fullPath, nil
+}
+
 var treeIgnoreDirs = map[string]bool{
 	".git":         true,
 	"node_modules": true,
@@ -39,7 +60,7 @@ func GetProjectTree(maxDepth int) string {
 
 	var b strings.Builder
 	b.WriteString(filepath.Base(root) + "/\n")
-	walkTree(root, 1, maxDepth, &b)
+	walkTree(root, root, 1, maxDepth, &b)
 
 	result := b.String()
 	if len(result) > 3000 {
@@ -48,7 +69,7 @@ func GetProjectTree(maxDepth int) string {
 	return result
 }
 
-func walkTree(dir string, depth, maxDepth int, b *strings.Builder) {
+func walkTree(root, dir string, depth, maxDepth int, b *strings.Builder) {
 	if depth > maxDepth {
 		return
 	}
@@ -72,7 +93,7 @@ func walkTree(dir string, depth, maxDepth int, b *strings.Builder) {
 		b.WriteString(prefix + name + "\n")
 
 		if entry.IsDir() {
-			walkTree(filepath.Join(dir, name), depth+1, maxDepth, b)
+			walkTree(root, filepath.Join(dir, name), depth+1, maxDepth, b)
 		}
 	}
 }
@@ -83,7 +104,10 @@ func ReadFileContent(relPath string, startLine, endLine int) (string, error) {
 		return "", fmt.Errorf("获取 git 根目录失败：%w", err)
 	}
 
-	fullPath := filepath.Join(root, relPath)
+	fullPath, err := isPathWithinRoot(root, relPath)
+	if err != nil {
+		return "", err
+	}
 
 	info, err := os.Stat(fullPath)
 	if err != nil {

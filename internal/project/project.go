@@ -2,7 +2,7 @@ package project
 
 import (
 	"bufio"
-	"bytes"
+	"encoding/json"
 	"fmt"
 	"os"
 	"os/exec"
@@ -145,14 +145,15 @@ func parseDependencies(filename, content string) []string {
 		}
 
 	case "package.json":
-		var buf bytes.Buffer
-		buf.WriteString(content)
 		var pkg struct {
 			Dependencies    map[string]string `json:"dependencies"`
 			DevDependencies map[string]string `json:"devDependencies"`
 		}
-		if strings.Contains(content, "\"dependencies\"") {
+		if err := json.Unmarshal([]byte(content), &pkg); err == nil {
 			for k := range pkg.Dependencies {
+				deps = append(deps, k)
+			}
+			for k := range pkg.DevDependencies {
 				deps = append(deps, k)
 			}
 		}

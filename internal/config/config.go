@@ -106,54 +106,27 @@ func Load() (*Config, error) {
 }
 
 func overrideFromEnv(cfg *Config) {
-	if apiKey := os.Getenv("AI_API_KEY"); apiKey != "" {
-		if cfg.AI.Models == nil {
-			cfg.AI.Models = make(map[string]ModelConfig)
-		}
-		defaultModel := cfg.AI.DefaultModel
-		if defaultModel == "" {
-			defaultModel = "deepseek"
-		}
-		m := cfg.AI.Models[defaultModel]
-		m.APIKey = apiKey
-		cfg.AI.Models[defaultModel] = m
+	defaultModel := cfg.AI.DefaultModel
+	if defaultModel == "" {
+		defaultModel = "deepseek"
 	}
-	if model := os.Getenv("AI_MODEL"); model != "" {
-		if cfg.AI.Models == nil {
-			cfg.AI.Models = make(map[string]ModelConfig)
-		}
-		defaultModel := cfg.AI.DefaultModel
-		if defaultModel == "" {
-			defaultModel = "deepseek"
-		}
-		m := cfg.AI.Models[defaultModel]
-		m.Model = model
-		cfg.AI.Models[defaultModel] = m
+	if cfg.AI.Models == nil {
+		cfg.AI.Models = make(map[string]ModelConfig)
 	}
-	if baseURL := os.Getenv("AI_BASE_URL"); baseURL != "" {
-		if cfg.AI.Models == nil {
-			cfg.AI.Models = make(map[string]ModelConfig)
-		}
-		defaultModel := cfg.AI.DefaultModel
-		if defaultModel == "" {
-			defaultModel = "deepseek"
-		}
-		m := cfg.AI.Models[defaultModel]
-		m.BaseURL = baseURL
-		cfg.AI.Models[defaultModel] = m
+	m := cfg.AI.Models[defaultModel]
+	if v := os.Getenv("AI_API_KEY"); v != "" {
+		m.APIKey = v
 	}
-	if timeout := os.Getenv("AI_TIMEOUT"); timeout != "" {
-		if cfg.AI.Models == nil {
-			cfg.AI.Models = make(map[string]ModelConfig)
-		}
-		defaultModel := cfg.AI.DefaultModel
-		if defaultModel == "" {
-			defaultModel = "deepseek"
-		}
-		m := cfg.AI.Models[defaultModel]
-		m.Timeout = timeout
-		cfg.AI.Models[defaultModel] = m
+	if v := os.Getenv("AI_MODEL"); v != "" {
+		m.Model = v
 	}
+	if v := os.Getenv("AI_BASE_URL"); v != "" {
+		m.BaseURL = v
+	}
+	if v := os.Getenv("AI_TIMEOUT"); v != "" {
+		m.Timeout = v
+	}
+	cfg.AI.Models[defaultModel] = m
 }
 
 func (c *Config) applyDefaults() {

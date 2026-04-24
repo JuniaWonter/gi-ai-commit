@@ -14,6 +14,23 @@ type CommitResult struct {
 	Stderr  string
 }
 
+// GetGitRoot returns the git repository root directory.
+// Simple implementation without caching to avoid issues with failed calls being cached.
+func GetGitRoot() (string, error) {
+	cmd := exec.Command("git", "rev-parse", "--show-toplevel")
+	var stdout, stderr bytes.Buffer
+	cmd.Stdout = &stdout
+	cmd.Stderr = &stderr
+	if err := cmd.Run(); err != nil {
+		return "", fmt.Errorf("获取 git 根目录失败：%w (stderr: %s)", err, stderr.String())
+	}
+	return strings.TrimSpace(stdout.String()), nil
+}
+
+func getGitRoot() (string, error) {
+	return GetGitRoot()
+}
+
 func Commit(message string) CommitResult {
 	gitRoot, err := getGitRoot()
 	if err != nil {
@@ -112,17 +129,4 @@ func ResetLastCommit() CommitResult {
 	}
 
 	return CommitResult{Success: true}
-}
-
-func GetGitRoot() (string, error) {
-	return getGitRoot()
-}
-
-func getGitRoot() (string, error) {
-	cmd := exec.Command("git", "rev-parse", "--show-toplevel")
-	output, err := cmd.Output()
-	if err != nil {
-		return "", fmt.Errorf("获取 git 根目录失败：%w", err)
-	}
-	return strings.TrimSpace(string(output)), nil
 }

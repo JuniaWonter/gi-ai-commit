@@ -4,16 +4,15 @@ import (
 	"fmt"
 	"os"
 	"os/exec"
-	"os/signal"
 	"strings"
-	"syscall"
+	"sync"
 
 	"github.com/charmbracelet/bubbles/spinner"
-	"github.com/charmbracelet/bubbles/textarea"
 	"github.com/charmbracelet/bubbles/viewport"
 	tea "github.com/charmbracelet/bubbletea"
 	"github.com/charmbracelet/lipgloss"
 	"github.com/oliver/git-ai-commit/internal/ai"
+	"github.com/oliver/git-ai-commit/internal/debug"
 	"github.com/oliver/git-ai-commit/internal/diff"
 	"github.com/oliver/git-ai-commit/internal/git"
 )
@@ -22,13 +21,11 @@ type phase int
 
 const (
 	phaseSelectFiles phase = iota
-	phaseDiffView
-	phaseStaging
 	phaseStreaming
 	phaseDone
 )
 
-type aiResponseMsg struct {
+type aiRoundMsg struct {
 	pending []ai.PendingToolCall
 	err     error
 }
@@ -37,30 +34,17 @@ type streamChunkMsg struct {
 	chunk ai.StreamChunk
 }
 
-type execDoneMsg struct {
-	pending []ai.PendingToolCall
-	err     error
-}
-
 type stageDoneMsg struct {
-	success bool
-	err     error
-}
-
-type resetDoneMsg struct {
-	success bool
-	err     error
+	success     bool
+	err         error
+	diffContent string
+	diffMode    string
 }
 
 var (
 	phaseHeaderStyle = lipgloss.NewStyle().
 		Bold(true).
 		Foreground(lipgloss.Color("63")).
-		Background(lipgloss.Color("235")).
-		Padding(0, 2)
-
-	phaseHelpStyle = lipgloss.NewStyle().
-		Foreground(lipgloss.Color("241")).
 		Background(lipgloss.Color("235")).
 		Padding(0, 2)
 
@@ -80,18 +64,14 @@ var (
 			Foreground(lipgloss.Color("1")).
 			Bold(true).
 			PaddingLeft(1)
-
-	tokenLineStyle = lipgloss.NewStyle().
-			Foreground(lipgloss.Color("63")).
-			PaddingLeft(1)
 )
 
 type CommitFlowOptions struct {
 	AutoConfirm bool
 	DryRun      bool
 	Desc        string
-	DiffContent string
-	DiffMode    string
+	DiffCfg     diff.DiffPromptConfig
+	GitRoot     string
 	Client      *ai.Client
 }
 
@@ -100,11 +80,11 @@ type CommitFlowModel struct {
 	opts         CommitFlowOptions
 	files        []diff.FileChange
 	fileSelector *FileSelector
-	textarea     textarea.Model
 	spinner      spinner.Model
 	termWidth    int
 	termHeight   int
 	ready        bool
+	stageInProgress bool
 
 	session        *ai.CommitSession
 	pendingCalls   []ai.PendingToolCall
@@ -114,6 +94,11 @@ type CommitFlowModel struct {
 	stagedFiles    []string
 	originalStaged []string
 	streamChan     chan tea.Msg
+	streamDoneCh   chan struct{} // signals goroutines to exit
+	streamDoneOnce sync.Once    // prevents double-close on streamDoneCh
+
+	stagedDiffContent string // diff of staged files, set after startStageCmd
+	stagedDiffMode    string
 
 	streamThinking strings.Builder
 	streamContent  strings.Builder
@@ -122,7 +107,8 @@ type CommitFlowModel struct {
 	outputLog       strings.Builder
 	contentViewport viewport.Model
 	vpReady         bool
-	awaitingConfirm bool
+	awaitingConfirm  bool
+	userAuthorizedCommit bool
 }
 
 func NewCommitFlowModel(files []diff.FileChange, opts CommitFlowOptions) *CommitFlowModel {
@@ -131,33 +117,41 @@ func NewCommitFlowModel(files []diff.FileChange, opts CommitFlowOptions) *Commit
 	s.Style = spinnerStyle
 	s.Spinner = spinner.Dot
 
-	ta := textarea.New()
-	ta.Placeholder = "输入 commit message..."
-	ta.CharLimit = 500
-	ta.SetWidth(80)
-	ta.SetHeight(10)
-
-	return &CommitFlowModel{
+	model := &CommitFlowModel{
 		phase:        phaseSelectFiles,
 		opts:         opts,
 		files:        files,
 		fileSelector: fs,
 		spinner:      s,
-		textarea:     ta,
+		streamDoneCh: make(chan struct{}),
 	}
+
+	// -y 模式：跳过文件选择，直接全选进入 streaming
+	if opts.AutoConfirm && len(files) > 0 {
+		var paths []string
+		for _, f := range files {
+			paths = append(paths, f.Path)
+		}
+		model.selectedFiles = paths
+		model.userAuthorizedCommit = true
+		model.phase = phaseStreaming
+	}
+
+	return model
 }
 
 func (m *CommitFlowModel) Init() tea.Cmd {
-	sigChan := make(chan os.Signal, 1)
-	signal.Notify(sigChan, syscall.SIGINT, syscall.SIGTERM)
-	return tea.Batch(m.fileSelector.Init(), m.spinner.Tick, func() tea.Msg {
-		sig := <-sigChan
-		return signalMsg{sig: sig}
-	})
-}
+	cmds := []tea.Cmd{
+		m.spinner.Tick,
+	}
 
-type signalMsg struct {
-	sig os.Signal
+	if m.opts.AutoConfirm && len(m.selectedFiles) > 0 {
+		cmds = append(cmds, m.startStageCmd(m.selectedFiles))
+	} else {
+		cmds = append(cmds, m.fileSelector.Init())
+	}
+
+	return tea.Batch(cmds...)
 }
 
 func (m *CommitFlowModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
@@ -168,7 +162,7 @@ func (m *CommitFlowModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		if !m.ready {
 			m.ready = true
 		}
-		if m.phase == phaseSelectFiles || m.phase == phaseDiffView {
+		if m.phase == phaseSelectFiles {
 			fsModel, cmd := m.fileSelector.Update(msg)
 			m.fileSelector = fsModel.(*FileSelector)
 			return m, cmd
@@ -190,7 +184,8 @@ func (m *CommitFlowModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		}
 		return m, nil
 
-	case signalMsg:
+	case tea.InterruptMsg:
+		m.closeStreamDone()
 		return m, tea.Quit
 
 	case streamChunkMsg:
@@ -210,14 +205,25 @@ func (m *CommitFlowModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			m.contentViewport.GotoBottom()
 		}
 		return m, tea.Batch(
-			func() tea.Msg { return <-m.streamChan },
+			func() tea.Msg {
+				select {
+				case msg := <-m.streamChan:
+					return msg
+				case <-m.streamDoneCh:
+					return nil
+				}
+			},
 			m.spinner.Tick,
 		)
 
-	case aiResponseMsg:
+	case aiRoundMsg:
 		m.spinner, _ = m.spinner.Update(msg)
+		// 防止重复处理
+		if m.phase == phaseDone {
+			return m, nil
+		}
 		if msg.err != nil {
-			m.appendErrorLine(fmt.Sprintf("AI 调用失败: %v", msg.err))
+			m.appendErrorLine(fmt.Sprintf("失败: %v", msg.err))
 			m.phase = phaseDone
 			m.refreshViewport()
 			return m, nil
@@ -233,56 +239,34 @@ func (m *CommitFlowModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			return m, nil
 		}
 		m.pendingCalls = msg.pending
-		if m.hasCommitCall() {
+		if m.hasCommitCall() && !m.opts.AutoConfirm {
 			m.awaitingConfirm = true
 			m.refreshViewport()
 			return m, nil
 		}
 		m.appendToolCallLines(msg.pending)
 		m.refreshViewport()
-		return m, m.autoExecCmd()
-
-	case execDoneMsg:
-		m.spinner, _ = m.spinner.Update(msg)
-		if msg.err != nil {
-			m.appendErrorLine(fmt.Sprintf("执行失败: %v", msg.err))
-			m.phase = phaseDone
-			m.refreshViewport()
-			return m, nil
-		}
-		if msg.pending == nil || len(msg.pending) == 0 {
-			result := m.session.GetResult()
-			if result.Success {
-				m.commitMessage = result.CommitMsg
-				m.commitHash = extractHash(result.ToolResults)
-			}
-			m.phase = phaseDone
-			m.refreshViewport()
-			return m, nil
-		}
-		m.pendingCalls = msg.pending
-		if m.hasCommitCall() {
-			m.awaitingConfirm = true
-			m.refreshViewport()
-			return m, nil
-		}
-		m.appendToolCallLines(msg.pending)
-		m.refreshViewport()
-		return m, m.autoExecCmd()
+		return m, m.execPendingCmd()
 
 	case stageDoneMsg:
+		m.stageInProgress = false
+		// 防止重复处理
+		if m.phase == phaseDone || m.phase == phaseStreaming {
+			return m, nil
+		}
 		if msg.success {
+			debug.Logf("stageDoneMsg success mode=%s diffBytes=%d", msg.diffMode, len(msg.diffContent))
+			m.stagedDiffContent = msg.diffContent
+			m.stagedDiffMode = msg.diffMode
 			m.phase = phaseStreaming
-			m.streamThinking.Reset()
-			m.streamContent.Reset()
-			m.streamDone = false
 			m.refreshViewport()
 			return m, tea.Batch(m.spinner.Tick, m.startGenerateCmd())
 		}
-		return m, tea.Quit
-
-	case resetDoneMsg:
-		return m, tea.Quit
+		debug.Logf("stageDoneMsg failed err=%v", msg.err)
+		m.phase = phaseDone
+		m.appendErrorLine(fmt.Sprintf("暂存文件失败: %v", msg.err))
+		m.refreshViewport()
+		return m, nil
 	}
 
 	switch m.phase {
@@ -290,43 +274,21 @@ func (m *CommitFlowModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		fsModel, cmd := m.fileSelector.Update(msg)
 		m.fileSelector = fsModel.(*FileSelector)
 		if m.fileSelector.done {
+			if m.stageInProgress {
+				return m, cmd
+			}
 			selected := m.fileSelector.GetSelectedFiles()
+			debug.Logf("selector done quitting=%v selected=%d", m.fileSelector.quitting, len(selected))
 			if m.fileSelector.quitting || len(selected) == 0 {
+				debug.Logf("selector exits without staging")
 				return m, tea.Quit
 			}
+			m.stageInProgress = true
 			m.selectedFiles = selected
-			m.phase = phaseStaging
+			debug.Logf("start stage selected=%v", selected)
 			return m, tea.Batch(cmd, m.spinner.Tick, m.startStageCmd(selected))
 		}
 		return m, cmd
-
-	case phaseDiffView:
-		fsModel, cmd := m.fileSelector.Update(msg)
-		m.fileSelector = fsModel.(*FileSelector)
-		if !m.fileSelector.showDiff && !m.fileSelector.diffLoading {
-			m.phase = phaseSelectFiles
-		}
-		if m.fileSelector.done {
-			selected := m.fileSelector.GetSelectedFiles()
-			if m.fileSelector.quitting || len(selected) == 0 {
-				return m, tea.Quit
-			}
-			m.selectedFiles = selected
-			m.phase = phaseStaging
-			return m, tea.Batch(cmd, m.spinner.Tick, m.startStageCmd(selected))
-		}
-		return m, cmd
-
-	case phaseStaging:
-		switch msg := msg.(type) {
-		case tea.KeyMsg:
-			if msg.Type == tea.KeyCtrlC {
-				return m, tea.Quit
-			}
-		}
-		var cmd tea.Cmd
-		m.spinner, cmd = m.spinner.Update(msg)
-		return m, tea.Batch(cmd, m.spinner.Tick)
 
 	case phaseStreaming:
 		var cmd tea.Cmd
@@ -338,12 +300,21 @@ func (m *CommitFlowModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		case tea.KeyMsg:
 			s := msg.String()
 			switch s {
+			case "enter":
+				if m.awaitingConfirm {
+					m.awaitingConfirm = false
+					m.userAuthorizedCommit = true
+					m.appendLine("→ 已确认提交，执行中...")
+					m.refreshViewport()
+					return m, m.execPendingCmd()
+				}
 			case "y", "Y":
 				if m.awaitingConfirm {
 					m.awaitingConfirm = false
+					m.userAuthorizedCommit = true
 					m.appendLine("→ 确认提交，执行中...")
 					m.refreshViewport()
-					return m, m.executeAuthorizedCmd()
+					return m, m.execPendingCmd()
 				}
 			case "n", "N":
 				if m.awaitingConfirm {
@@ -352,25 +323,39 @@ func (m *CommitFlowModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 					m.refreshViewport()
 					return m, nil
 				}
+			case "esc":
+				if m.awaitingConfirm {
+					m.appendLine("→ 用户取消提交")
+					m.phase = phaseDone
+					m.refreshViewport()
+					return m, nil
+				}
 			case "ctrl+c":
+				m.closeStreamDone()
 				return m, tea.Quit
 			}
 		}
-		if m.streamContent.Len() > 0 || m.streamThinking.Len() > 0 || m.streamDone {
-			m.refreshViewport()
-			if !m.streamDone {
-				m.contentViewport.GotoBottom()
-			}
+		m.refreshViewport()
+		if !m.streamDone {
+			m.contentViewport.GotoBottom()
 		}
 		if m.streamDone {
 			return m, cmd
 		}
-		return m, tea.Batch(cmd, m.spinner.Tick, func() tea.Msg { return <-m.streamChan })
+		return m, tea.Batch(cmd, m.spinner.Tick, func() tea.Msg {
+			select {
+			case msg := <-m.streamChan:
+				return msg
+			case <-m.streamDoneCh:
+				return nil
+			}
+		})
 
 	case phaseDone:
 		switch msg := msg.(type) {
 		case tea.KeyMsg:
 			if msg.Type == tea.KeyEnter || msg.Type == tea.KeyEscape || msg.String() == "q" || msg.String() == "ctrl+c" {
+				m.closeStreamDone()
 				return m, tea.Quit
 			}
 		}
@@ -428,7 +413,7 @@ func (m *CommitFlowModel) refreshViewport() {
 	}
 
 	if m.phase == phaseStreaming && m.awaitingConfirm {
-		vis += "\n" + lipgloss.NewStyle().PaddingLeft(1).Bold(true).Foreground(lipgloss.Color("220")).Render("是否确认提交？(Y/N)")
+		vis += "\n" + lipgloss.NewStyle().PaddingLeft(1).Bold(true).Foreground(lipgloss.Color("220")).Render("➜ 等待确认: 按 Y/Enter 确认提交 / N 取消 / Esc 退出")
 	}
 
 	if m.phase == phaseDone {
@@ -450,6 +435,10 @@ func (m *CommitFlowModel) refreshViewport() {
 	}
 
 	m.contentViewport.SetContent(vis)
+}
+
+func (m *CommitFlowModel) closeStreamDone() {
+	m.streamDoneOnce.Do(func() { close(m.streamDoneCh) })
 }
 
 func (m *CommitFlowModel) appendLine(line string) {
@@ -483,13 +472,28 @@ func (m *CommitFlowModel) appendToolCallLines(calls []ai.PendingToolCall) {
 
 func (m *CommitFlowModel) startStageCmd(files []string) tea.Cmd {
 	return func() tea.Msg {
+		debug.Logf("startStageCmd begin files=%v", files)
 		originalStaged := getStagedFiles()
 		if err := diff.StageFiles(files); err != nil {
+			debug.Logf("startStageCmd stage failed err=%v", err)
 			return stageDoneMsg{success: false, err: err}
 		}
 		m.stagedFiles = files
 		m.originalStaged = originalStaged
-		return stageDoneMsg{success: true}
+
+		// stage 完成后，基于实际暂存文件重新获取 diff，确保 AI 分析与提交内容一致
+		processor := diff.NewDiffProcessor(m.opts.DiffCfg, m.opts.GitRoot)
+		payloads, err := processor.BuildPayloadsForFiles(files)
+		if err != nil || len(payloads) == 0 {
+			debug.Logf("startStageCmd payload build failed err=%v payloadCount=%d", err, len(payloads))
+			return stageDoneMsg{success: false, err: fmt.Errorf("获取 staged diff 失败: %w", err)}
+		}
+		debug.Logf("startStageCmd payload ready mode=%s bytes=%d", payloads[0].Mode, len(payloads[0].Content))
+		return stageDoneMsg{
+			success:     true,
+			diffContent: payloads[0].Content,
+			diffMode:    payloads[0].Mode,
+		}
 	}
 }
 
@@ -513,12 +517,16 @@ func getStagedFiles() []string {
 
 func (m *CommitFlowModel) startGenerateCmd() tea.Cmd {
 	conventionInfo := git.DetectConventions()
+	debug.Logf("startGenerateCmd begin stagedDiffMode=%s stagedDiffBytes=%d", m.stagedDiffMode, len(m.stagedDiffContent))
+	// 使用 stage 后的实际 diff，确保 AI 分析的内容与提交完全一致
 	sess, err := m.opts.Client.StartCommitSession(
-		m.opts.DiffContent, m.opts.Desc, conventionInfo, 3,
+		m.stagedDiffContent, m.opts.Desc, conventionInfo, 3, m.selectedFiles,
 	)
 	if err != nil {
-		return func() tea.Msg { return aiResponseMsg{err: err} }
+		debug.Logf("startGenerateCmd StartCommitSession failed err=%v", err)
+		return func() tea.Msg { return aiRoundMsg{err: err} }
 	}
+	debug.Logf("startGenerateCmd session started")
 	m.session = sess
 	m.streamThinking.Reset()
 	m.streamContent.Reset()
@@ -527,46 +535,94 @@ func (m *CommitFlowModel) startGenerateCmd() tea.Cmd {
 
 	m.streamChan = make(chan tea.Msg, 64)
 	go func() {
+		defer func() {
+			// Drain channel to prevent goroutine leak
+			close(m.streamChan)
+		}()
 		pending, streamErr := sess.StreamAI(func(chunk ai.StreamChunk) {
-			m.streamChan <- streamChunkMsg{chunk: chunk}
+			select {
+			case m.streamChan <- streamChunkMsg{chunk: chunk}:
+			case <-m.streamDoneCh:
+			}
 		})
 		if streamErr != nil {
-			m.streamChan <- aiResponseMsg{err: streamErr}
+			select {
+			case m.streamChan <- aiRoundMsg{err: streamErr}:
+			case <-m.streamDoneCh:
+			}
 			return
 		}
-		m.streamChan <- aiResponseMsg{pending: pending}
+		select {
+		case m.streamChan <- aiRoundMsg{pending: pending}:
+		case <-m.streamDoneCh:
+		}
 	}()
 
 	return func() tea.Msg {
-		return <-m.streamChan
+		select {
+		case msg := <-m.streamChan:
+			return msg
+		case <-m.streamDoneCh:
+			return nil
+		}
 	}
 }
 
-func (m *CommitFlowModel) executeAuthorizedCmd() tea.Cmd {
+func (m *CommitFlowModel) execPendingCmd() tea.Cmd {
 	m.streamThinking.Reset()
 	m.streamContent.Reset()
 	m.streamDone = false
-	m.appendLine(m.spinner.View() + " 正在执行提交...")
+
+	label := "正在执行工具..."
+	if m.hasCommitCall() {
+		label = "正在执行提交..."
+	}
+	m.appendLine(m.spinner.View() + " " + label)
 	m.refreshViewport()
 
 	m.streamChan = make(chan tea.Msg, 64)
 	go func() {
+		defer func() {
+			close(m.streamChan)
+		}()
 		authorized := make([]bool, len(m.pendingCalls))
-		for i := range authorized {
-			authorized[i] = true
+		for i, tc := range m.pendingCalls {
+			if tc.Name == "git_commit" || tc.Name == "git_commit_amend" {
+				if m.userAuthorizedCommit {
+					authorized[i] = true
+				} else {
+					authorized[i] = false
+				}
+			} else {
+				authorized[i] = true
+			}
 		}
 		pending, err := m.session.ExecuteAndResumeWithStream(m.pendingCalls, authorized, func(chunk ai.StreamChunk) {
-			m.streamChan <- streamChunkMsg{chunk: chunk}
+			select {
+			case m.streamChan <- streamChunkMsg{chunk: chunk}:
+			case <-m.streamDoneCh:
+			}
 		})
 		if err != nil {
-			m.streamChan <- execDoneMsg{err: err}
+			select {
+			case m.streamChan <- aiRoundMsg{err: err}:
+			case <-m.streamDoneCh:
+			}
 			return
 		}
-		m.streamChan <- execDoneMsg{pending: pending}
+		select {
+		case m.streamChan <- aiRoundMsg{pending: pending}:
+		case <-m.streamDoneCh:
+		}
 	}()
 
 	return func() tea.Msg {
-		return <-m.streamChan
+		select {
+		case msg := <-m.streamChan:
+			return msg
+		case <-m.streamDoneCh:
+			return nil
+		}
 	}
 }
 
@@ -579,60 +635,36 @@ func (m *CommitFlowModel) hasCommitCall() bool {
 	return false
 }
 
-func (m *CommitFlowModel) autoExecCmd() tea.Cmd {
-	m.streamThinking.Reset()
-	m.streamContent.Reset()
-	m.streamDone = false
-	m.appendLine(m.spinner.View() + " 正在执行工具...")
-	m.refreshViewport()
-
-	m.streamChan = make(chan tea.Msg, 64)
-	go func() {
-		authorized := make([]bool, len(m.pendingCalls))
-		for i := range authorized {
-			authorized[i] = true
-		}
-		pending, err := m.session.ExecuteAndResumeWithStream(m.pendingCalls, authorized, func(chunk ai.StreamChunk) {
-			m.streamChan <- streamChunkMsg{chunk: chunk}
-		})
-		if err != nil {
-			m.streamChan <- execDoneMsg{err: err}
-			return
-		}
-		m.streamChan <- execDoneMsg{pending: pending}
-	}()
-
-	return func() tea.Msg {
-		return <-m.streamChan
-	}
-}
-
 func (m *CommitFlowModel) View() string {
 	switch m.phase {
-	case phaseSelectFiles, phaseDiffView:
+	case phaseSelectFiles:
 		return m.fileSelector.View()
 
-	case phaseStaging:
-		header := phaseHeaderStyle.Width(m.termWidth).Render("  暂存文件...")
-		help := phaseHelpStyle.Width(m.termWidth).Render("  Ctrl+C 取消")
-		content := lipgloss.NewStyle().Padding(2).Render(m.spinner.View() + " 正在暂存选中的文件...")
-		return lipgloss.JoinVertical(lipgloss.Left, header, content, help)
-
 	case phaseStreaming:
-		header := phaseHeaderStyle.Width(m.termWidth).Render("  AI 代码审查 & 提交")
-		if m.opts.DiffMode != "" && m.opts.DiffMode != "完整 diff" {
-			header = phaseHeaderStyle.Width(m.termWidth).Render(fmt.Sprintf("  AI 代码审查 & 提交（%s 模式）", m.opts.DiffMode))
+		w := m.termWidth
+		if w == 0 {
+			w = 80
 		}
-
+		header := phaseHeaderStyle.Width(w).Render("  AI 代码审查 & 提交")
+		if m.stagedDiffMode != "" && m.stagedDiffMode != "完整 diff" {
+			header = phaseHeaderStyle.Width(w).Render(fmt.Sprintf("  AI 代码审查 & 提交（%s 模式）", m.stagedDiffMode))
+		}
+		if !m.vpReady {
+			return lipgloss.JoinVertical(lipgloss.Left, header, m.spinner.View()+" AI 正在分析代码变更...")
+		}
 		return lipgloss.JoinVertical(lipgloss.Left, header, m.contentViewport.View())
 
 	case phaseDone:
-		header := phaseHeaderStyle.Width(m.termWidth).Render("  完成")
+		w := m.termWidth
+		if w == 0 {
+			w = 80
+		}
+		header := phaseHeaderStyle.Width(w).Render("  完成")
 		help := lipgloss.NewStyle().
 			Foreground(lipgloss.Color("241")).
 			Background(lipgloss.Color("235")).
 			Padding(0, 2).
-			Width(m.termWidth).
+			Width(w).
 			Render("  按 Enter / Esc / q 退出")
 
 		var tokenInfo string
@@ -643,9 +675,17 @@ func (m *CommitFlowModel) View() string {
 					Foreground(lipgloss.Color("241")).
 					Background(lipgloss.Color("235")).
 					Padding(0, 2).
-					Width(m.termWidth).
+					Width(w).
 					Render(fmt.Sprintf("  Token 消耗: prompt=%d  completion=%d  total=%d", result.PromptTokens, result.CompletionTokens, result.TotalTokens))
 			}
+		}
+
+		if !m.vpReady {
+			content := lipgloss.JoinVertical(lipgloss.Left, header, help)
+			if tokenInfo != "" {
+				content = lipgloss.JoinVertical(lipgloss.Left, header, tokenInfo, help)
+			}
+			return content
 		}
 
 		if tokenInfo != "" {
@@ -658,6 +698,11 @@ func (m *CommitFlowModel) View() string {
 }
 
 func (m *CommitFlowModel) GetResult() CommitFlowResult {
+	if m.session == nil {
+		return CommitFlowResult{
+			SelectedFiles: m.selectedFiles,
+		}
+	}
 	result := m.session.GetResult()
 	return CommitFlowResult{
 		Success:          m.commitMessage != "",
@@ -694,7 +739,14 @@ func extractHash(results []ai.ToolCallResult) string {
 
 func RunCommitFlow(files []diff.FileChange, opts CommitFlowOptions) (CommitFlowResult, error) {
 	m := NewCommitFlowModel(files, opts)
-	p := tea.NewProgram(m, tea.WithAltScreen())
+
+	if os.Getenv("TERM") == "" {
+		os.Setenv("TERM", "dumb")
+	}
+
+	p := tea.NewProgram(m,
+		tea.WithAltScreen(),
+	)
 
 	model, err := p.Run()
 	if err != nil {

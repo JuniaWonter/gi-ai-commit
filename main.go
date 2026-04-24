@@ -4,6 +4,7 @@ import (
 	"flag"
 	"fmt"
 	"os"
+	"syscall"
 
 	"github.com/oliver/git-ai-commit/cmd"
 )
@@ -11,6 +12,14 @@ import (
 const version = "0.1.0"
 
 func main() {
+	// macOS 默认软限制 256，跑 TUI + 多个 git 子进程时容易耗尽
+	// 启动时把软限制提升到硬限制（通常 10240）
+	var rLimit syscall.Rlimit
+	if err := syscall.Getrlimit(syscall.RLIMIT_NOFILE, &rLimit); err == nil {
+		rLimit.Cur = rLimit.Max
+		_ = syscall.Setrlimit(syscall.RLIMIT_NOFILE, &rLimit)
+	}
+
 	if len(os.Args) < 2 {
 		printUsage()
 		os.Exit(1)
@@ -34,9 +43,9 @@ func main() {
 		}
 
 		if err := cmd.RunCommit(opts); err != nil {
-		if err.Error() == "用户取消提交" {
-			os.Exit(130)
-		}
+			if err.Error() == "用户取消提交" {
+				os.Exit(130)
+			}
 			fmt.Fprintf(os.Stderr, "❌ 错误：%v\n", err)
 			os.Exit(1)
 		}

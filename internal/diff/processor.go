@@ -5,6 +5,8 @@ import (
 	"os/exec"
 	"sort"
 	"strings"
+
+	"github.com/oliver/git-ai-commit/internal/debug"
 )
 
 const (
@@ -53,6 +55,7 @@ func (p *DiffProcessor) BuildPayloads() ([]DiffPayload, error) {
 func (p *DiffProcessor) BuildPayloadsForFiles(files []string) ([]DiffPayload, error) {
 	var fullDiff string
 	var err error
+	debug.Logf("processor.BuildPayloadsForFiles begin gitDir=%s fileCount=%d", p.gitDir, len(files))
 
 	if len(files) == 0 {
 		fullDiff, err = p.getAllDiff()
@@ -61,8 +64,10 @@ func (p *DiffProcessor) BuildPayloadsForFiles(files []string) ([]DiffPayload, er
 		fullDiff, err = p.getCmdOutput("git", args...)
 	}
 	if err != nil {
+		debug.Logf("processor.BuildPayloadsForFiles failed err=%v", err)
 		return nil, err
 	}
+	debug.Logf("processor.BuildPayloadsForFiles diffBytes=%d", len(fullDiff))
 	return p.buildPayloadsFromDiff(fullDiff, files)
 }
 
@@ -145,12 +150,12 @@ func (p *DiffProcessor) buildPayloadsFromDiff(fullDiff string, files []string) (
 func (p *DiffProcessor) getDiffStatAndNameStatus(files []string) (string, string) {
 	var stat, nameStatus string
 	if len(files) == 0 {
-		stat, _ = p.getCmdOutput("git", "diff", "--cached", "--stat")
-		nameStatus, _ = p.getCmdOutput("git", "diff", "--cached", "--name-status")
+		stat, _ = p.getCmdOutput("git", "diff", "HEAD", "--stat")
+		nameStatus, _ = p.getCmdOutput("git", "diff", "HEAD", "--name-status")
 	} else {
-		statArgs := append([]string{"diff", "--cached", "--stat", "--"}, files...)
+		statArgs := append([]string{"diff", "HEAD", "--stat", "--"}, files...)
 		stat, _ = p.getCmdOutput("git", statArgs...)
-		nameStatusArgs := append([]string{"diff", "--cached", "--name-status", "--"}, files...)
+		nameStatusArgs := append([]string{"diff", "HEAD", "--name-status", "--"}, files...)
 		nameStatus, _ = p.getCmdOutput("git", nameStatusArgs...)
 	}
 	return stat, nameStatus
@@ -164,6 +169,11 @@ func (p *DiffProcessor) getCmdOutput(name string, args ...string) (string, error
 	cmd := exec.Command(name, args...)
 	cmd.Dir = p.gitDir
 	out, err := cmd.Output()
+	if err != nil {
+		debug.Logf("processor.getCmdOutput failed cmd=%s args=%v dir=%s err=%v", name, args, p.gitDir, err)
+	} else {
+		debug.Logf("processor.getCmdOutput ok cmd=%s args=%v dir=%s outBytes=%d", name, args, p.gitDir, len(out))
+	}
 	return string(out), err
 }
 
@@ -180,9 +190,9 @@ func (p *DiffProcessor) buildCompactDiffInternal(fullDiff string, files []string
 
 	var numStat string
 	if len(files) == 0 {
-		numStat, _ = p.getCmdOutput("git", "diff", "--cached", "--numstat")
+		numStat, _ = p.getCmdOutput("git", "diff", "HEAD", "--numstat")
 	} else {
-		numStatArgs := append([]string{"diff", "--cached", "--numstat", "--"}, files...)
+		numStatArgs := append([]string{"diff", "HEAD", "--numstat", "--"}, files...)
 		numStat, _ = p.getCmdOutput("git", numStatArgs...)
 	}
 	scores := parseNumStat(numStat)

@@ -7,6 +7,8 @@ import (
 	"os/exec"
 	"path/filepath"
 	"strings"
+
+	"github.com/oliver/git-ai-commit/internal/debug"
 )
 
 type FileChange struct {
@@ -46,9 +48,8 @@ func GetChangedFiles() ([]FileChange, error) {
 		}
 
 		status := line[:2]
-		if strings.Contains(status, "D") && !strings.Contains(status, "D") {
-			continue
-		}
+		// 所有有效变更（新增、修改、删除、重命名等）都显示给用户选择
+		// StageFiles 已处理已删除文件（git add -u）
 
 		path := strings.TrimSpace(line[2:])
 		staged := status[0] != ' '
@@ -163,17 +164,18 @@ func StageFiles(paths []string) error {
 	if len(paths) == 0 {
 		return nil
 	}
+	debug.Logf("diff.StageFiles begin pathCount=%d", len(paths))
 
 	gitRoot, err := getGitRoot()
 	if err != nil {
+		debug.Logf("diff.StageFiles getGitRoot failed err=%v", err)
 		return fmt.Errorf("获取 git 根目录失败：%w", err)
 	}
 
+	// 尝试清空暂存区，如果失败（如无 HEAD）则忽略
 	resetCmd := exec.Command("git", "reset")
 	resetCmd.Dir = gitRoot
-	if err := resetCmd.Run(); err != nil {
-		return fmt.Errorf("清空暂存区失败：%w", err)
-	}
+	_ = resetCmd.Run()
 
 	var toStage, toDelete []string
 	for _, p := range paths {
@@ -185,25 +187,30 @@ func StageFiles(paths []string) error {
 	}
 
 	if len(toDelete) > 0 {
+		debug.Logf("diff.StageFiles stage deleted files count=%d", len(toDelete))
 		args := []string{"add", "-u"}
 		args = append(args, toDelete...)
 		cmd := exec.Command("git", args...)
 		cmd.Dir = gitRoot
 		if err := cmd.Run(); err != nil {
+			debug.Logf("diff.StageFiles stage deleted failed err=%v", err)
 			return fmt.Errorf("暂存删除文件失败：%w", err)
 		}
 	}
 
 	if len(toStage) > 0 {
+		debug.Logf("diff.StageFiles stage files count=%d", len(toStage))
 		args := []string{"add"}
 		args = append(args, toStage...)
 		cmd := exec.Command("git", args...)
 		cmd.Dir = gitRoot
 		output, err := cmd.CombinedOutput()
 		if err != nil {
+			debug.Logf("diff.StageFiles git add failed err=%v output=%s", err, strings.TrimSpace(string(output)))
 			return fmt.Errorf("暂存文件失败：%w, output: %s", err, string(output))
 		}
 	}
+	debug.Logf("diff.StageFiles success")
 	return nil
 }
 
@@ -260,12 +267,16 @@ func getUntrackedDiff(gitRoot, filePath string, ignoreWS bool) (string, error) {
 }
 
 func getGitRoot() (string, error) {
+	debug.Logf("diff.getGitRoot start")
 	cmd := exec.Command("git", "rev-parse", "--show-toplevel")
 	output, err := cmd.Output()
 	if err != nil {
+		debug.Logf("diff.getGitRoot failed err=%v", err)
 		return "", fmt.Errorf("获取 git 根目录失败：%w", err)
 	}
-	return strings.TrimSpace(string(output)), nil
+	root := strings.TrimSpace(string(output))
+	debug.Logf("diff.getGitRoot success root=%s", root)
+	return root, nil
 }
 
 func LimitDiffLines(diff string, maxLines int) string {
