@@ -421,6 +421,16 @@ func (f *FileSelector) handleSelectorKeys(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 		if len(f.files) > 0 && !f.diffLoading {
 			filePath := f.files[f.cursor].Path
 			f.diffPath = filePath
+			f.splitView = false
+			f.diffLoading = true
+			return f, loadDiffCmd(filePath, f.ignoreWS)
+		}
+
+	case "V":
+		if len(f.files) > 0 && !f.diffLoading {
+			filePath := f.files[f.cursor].Path
+			f.diffPath = filePath
+			f.splitView = true
 			f.diffLoading = true
 			return f, loadDiffCmd(filePath, f.ignoreWS)
 		}
@@ -991,7 +1001,7 @@ func (f *FileSelector) renderSplitView() string {
 func (f *FileSelector) renderFileList() string {
 	var b strings.Builder
 
-	b.WriteString("选择要提交的文件 (↑↓/j/k 移动，Space 选择，Enter 确认，A 全选，D 取消，v 查看 diff，e 添加 gitignore，S 确认，Q 退出)\n\n")
+	b.WriteString("选择要提交的文件 (↑↓/j/k 移动，Space 选择，Enter 确认，A 全选，D 取消，v 合并视图，V 分屏对比，e 添加 gitignore，S 确认，Q 退出)\n\n")
 
 	for i, file := range f.files {
 		cursor := " "
