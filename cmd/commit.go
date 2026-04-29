@@ -11,7 +11,6 @@ import (
 	"github.com/oliver/git-ai-commit/internal/debug"
 	"github.com/oliver/git-ai-commit/internal/description"
 	"github.com/oliver/git-ai-commit/internal/diff"
-	"github.com/oliver/git-ai-commit/internal/loading"
 	"github.com/oliver/git-ai-commit/internal/project"
 	"github.com/oliver/git-ai-commit/tui"
 )
@@ -70,7 +69,7 @@ func RunCommit(opts CommitOptions) error {
 	}
 
 	fmt.Println("📋 检查仓库描述...")
-	desc, _, err := handleDescription(cfg, client, gitRoot)
+	descFunc, err := prepareDescription(cfg, client, gitRoot)
 	if err != nil {
 		return fmt.Errorf("处理描述失败：%w", err)
 	}
@@ -86,7 +85,7 @@ func RunCommit(opts CommitOptions) error {
 	result, err := tui.RunCommitFlow(files, tui.CommitFlowOptions{
 		AutoConfirm: opts.AutoConfirm,
 		DryRun:      opts.DryRun,
-		Desc:        desc,
+		DescFunc:    descFunc,
 		DiffCfg:     diffCfg,
 		GitRoot:     gitRoot,
 		Client:      client,
@@ -124,74 +123,72 @@ func isGitRepo() bool {
 	return cmd.Run() == nil
 }
 
-func handleDescription(cfg *config.Config, client *ai.Client, projRoot string) (string, bool, error) {
+func prepareDescription(cfg *config.Config, client *ai.Client, projRoot string) (func() string, error) {
 	exists, err := description.Exists()
 	if err != nil {
-		return "", false, err
+		return nil, err
 	}
 
 	count, err := counter.Get()
 	if err != nil {
-		return "", false, err
+		return nil, err
 	}
 
 	const updateInterval = 10
 
-	// 只在首次或到达更新间隔时才需要 diff 和 AI 调用
 	needsUpdate := !exists || description.ShouldUpdate(count, updateInterval)
 	if !needsUpdate {
 		desc, err := description.Read()
 		if err != nil {
-			return "", false, err
+			return nil, err
 		}
-		return desc, false, nil
+		return func() string { return desc }, nil
 	}
 
-	projectInfo, err := project.GetSummary(projRoot)
-	if err != nil {
-		return "", false, err
-	}
+	// Start AI generation in background, TUI launches immediately.
+	// The returned function blocks until the description is ready.
+	descCh := make(chan string, 1)
+	existingDesc, _ := description.Read()
 
-	fileInfo, err := project.GetFileSummary(projRoot, nil)
-	if err != nil {
-		return "", false, err
-	}
-
-	// 获取少量 diff 辅助 AI 理解项目变化
-	stagedDiff, _ := diff.GetStagedDiff()
-	limitedDiff := diff.LimitDiffLines(stagedDiff, 100)
-
-	if !exists {
-		fmt.Println("📝 首次提交，生成仓库描述...")
-		spinner := loading.New("正在生成项目描述...")
-		spinner.Start()
-		desc, err := client.GenerateDescription(projectInfo, fileInfo, limitedDiff)
-		spinner.Stop("生成完成")
+	go func() {
+		projectInfo, err := project.GetSummary(projRoot)
 		if err != nil {
-			return "", false, fmt.Errorf("生成描述失败：%w", err)
+			descCh <- existingDesc
+			return
+		}
+		fileInfo, err := project.GetFileSummary(projRoot, nil)
+		if err != nil {
+			descCh <- existingDesc
+			return
+		}
+		stagedDiff, _ := diff.GetStagedDiff()
+		limitedDiff := diff.LimitDiffLines(stagedDiff, 100)
+
+		if !exists {
+			fmt.Println("📝 首次提交，生成仓库描述...")
+		} else {
+			fmt.Println("📝 达到更新间隔，更新仓库描述...")
+		}
+
+		desc, err := client.GenerateDescription(projectInfo, fileInfo, limitedDiff)
+		if err != nil {
+			descCh <- existingDesc
+			return
 		}
 		if err := description.Write(desc); err != nil {
-			return "", false, fmt.Errorf("保存描述失败：%w", err)
+			descCh <- existingDesc
+			return
 		}
-		fmt.Println("✅ 仓库描述已创建")
-		return desc, true, nil
-	}
 
-	fmt.Println("📝 达到更新间隔，更新仓库描述...")
-	spinner := loading.New("正在更新项目描述...")
-	spinner.Start()
-	desc, err := client.GenerateDescription(projectInfo, fileInfo, limitedDiff)
-	spinner.Stop("更新完成")
-	if err != nil {
-		// 更新失败时降级读取旧描述，不中断流程
-		desc, _ = description.Read()
-		return desc, true, nil
-	}
-	if err := description.Write(desc); err != nil {
-		return "", false, fmt.Errorf("更新描述失败：%w", err)
-	}
-	fmt.Println("✅ 仓库描述已更新")
-	return desc, true, nil
+		if !exists {
+			fmt.Println("✅ 仓库描述已创建")
+		} else {
+			fmt.Println("✅ 仓库描述已更新")
+		}
+		descCh <- desc
+	}()
+
+	return func() string { return <-descCh }, nil
 }
 
 func getProjectRoot() (string, error) {
