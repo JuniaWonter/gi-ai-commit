@@ -989,7 +989,9 @@ func inferScopeHints(paths []string) []string {
 		}
 		return items[i].count > items[j].count
 	})
-		res = append(res, items[i].name)
+	var res []string
+	for _, item := range items {
+		res = append(res, item.name)
 	}
 	return res
 }
