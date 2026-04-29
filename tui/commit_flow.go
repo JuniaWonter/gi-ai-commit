@@ -4,6 +4,7 @@ import (
 	"fmt"
 	"os"
 	"os/exec"
+	"regexp"
 	"strings"
 	"sync"
 
@@ -69,7 +70,7 @@ var (
 type CommitFlowOptions struct {
 	AutoConfirm bool
 	DryRun      bool
-	Desc        string
+	DescFunc    func() string // lazy description, blocks until ready
 	DiffCfg     diff.DiffPromptConfig
 	GitRoot     string
 	Client      *ai.Client
@@ -520,7 +521,7 @@ func (m *CommitFlowModel) startGenerateCmd() tea.Cmd {
 	debug.Logf("startGenerateCmd begin stagedDiffMode=%s stagedDiffBytes=%d", m.stagedDiffMode, len(m.stagedDiffContent))
 	// 使用 stage 后的实际 diff，确保 AI 分析的内容与提交完全一致
 	sess, err := m.opts.Client.StartCommitSession(
-		m.stagedDiffContent, m.opts.Desc, conventionInfo, 3, m.selectedFiles,
+		m.stagedDiffContent, m.opts.DescFunc(), conventionInfo, 3, m.selectedFiles,
 	)
 	if err != nil {
 		debug.Logf("startGenerateCmd StartCommitSession failed err=%v", err)
@@ -725,12 +726,13 @@ type CommitFlowResult struct {
 	TotalTokens      int
 }
 
+var hashRe = regexp.MustCompile(`SUCCESS[^\n]*?([0-9a-f]{7,40})`)
+
 func extractHash(results []ai.ToolCallResult) string {
 	for _, tr := range results {
-		if (tr.ToolName == "git_commit" || tr.ToolName == "git_commit_amend") && strings.Contains(tr.Result, "SUCCESS") {
-			parts := strings.Fields(tr.Result)
-			if len(parts) >= 4 {
-				return parts[3]
+		if tr.ToolName == "git_commit" || tr.ToolName == "git_commit_amend" {
+			if matches := hashRe.FindStringSubmatch(tr.Result); len(matches) >= 2 {
+				return matches[1]
 			}
 		}
 	}

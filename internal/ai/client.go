@@ -9,6 +9,7 @@ import (
 	"sort"
 	"strconv"
 	"strings"
+	"sync"
 	"time"
 
 	"github.com/oliver/git-ai-commit/internal/git"
@@ -151,8 +152,11 @@ type CommitSession struct {
 	listTreeCalls    int
 	maxReadFileCalls int
 	maxListTreeCalls int
-	compactMode      bool
+	compactMode        bool
 	noToolCallFallback bool
+	toolCache          map[string]string
+	readFiles          map[string]bool // tracks which files have been read to prevent re-reads
+	mu                 sync.Mutex
 }
 
 type StreamChunk struct {
@@ -201,6 +205,8 @@ func (c *Client) StartCommitSession(diffContent, description string, conventionI
 		maxReadFileCalls: envIntOrDefault("GIT_AI_MAX_READ_FILE_CALLS", 4),
 		maxListTreeCalls: envIntOrDefault("GIT_AI_MAX_LIST_TREE_CALLS", 1),
 		compactMode:      compactMode,
+			toolCache:        make(map[string]string),
+			readFiles:        make(map[string]bool),
 	}
 
 	return sess, nil
@@ -208,13 +214,14 @@ func (c *Client) StartCommitSession(diffContent, description string, conventionI
 
 func (s *CommitSession) StreamAI(send func(chunk StreamChunk)) ([]PendingToolCall, error) {
 	s.streaming = true
+	maxTokens := envIntOrDefault("GIT_AI_MAX_COMPLETION_TOKENS", 2000)
 	req := openai.ChatCompletionRequest{
 		Model:                s.client.config.Model,
 		Messages:             s.messages,
 		Tools:                s.tools,
 		Temperature:          0.3,
 		Stream:               true,
-		MaxCompletionTokens:  2000, // 【关键】限制输出 token，预留足够空间给 tool_calls + commit message
+		MaxCompletionTokens:  maxTokens,
 	}
 
 	ctx, cancel := context.WithTimeout(context.Background(), s.client.config.Timeout)
@@ -229,6 +236,7 @@ func (s *CommitSession) StreamAI(send func(chunk StreamChunk)) ([]PendingToolCal
 	var fullContent strings.Builder
 	var fullThinking strings.Builder
 	var toolCalls []openai.ToolCall
+	var finishReason openai.FinishReason
 
 	for {
 		resp, err := stream.Recv()
@@ -281,6 +289,7 @@ func (s *CommitSession) StreamAI(send func(chunk StreamChunk)) ([]PendingToolCal
 		}
 
 		if resp.Choices[0].FinishReason != "" {
+			finishReason = resp.Choices[0].FinishReason
 			break
 		}
 	}
@@ -299,8 +308,9 @@ func (s *CommitSession) StreamAI(send func(chunk StreamChunk)) ([]PendingToolCal
 	s.messages = append(s.messages, assistantMsg)
 	
 	// 【关键】检测是否因为输出超限被截断
-	// 如果没有 tool_calls 且内容以特定模式结尾，说明可能被截断了
-	isOutputTruncated := len(toolCalls) == 0 && isTruncationSignal(fullContent.String())
+	// finish_reason="length" 是 API 返回的最可靠截断信号
+		// 启发式规则 isTruncationSignal 作为兜底
+	isOutputTruncated := len(toolCalls) == 0 && (finishReason == openai.FinishReasonLength || isTruncationSignal(fullContent.String()))
 
 	// 【关键】如果没有 tool_calls，需要诊断原因
 	if len(toolCalls) == 0 {
@@ -376,41 +386,89 @@ func (s *CommitSession) ExecuteAndResumeWithStream(pending []PendingToolCall, au
 		return nil, fmt.Errorf("提交失败次数达上限（%d 次），请手动处理", s.maxRetries)
 	}
 
-	for i, auth := range authorized {
-		if i >= len(pending) {
-			break
+	type execResult struct {
+			index  int
+			result string
 		}
-		tc := pending[i]
-		if !auth {
+
+		results := make([]execResult, len(pending))
+		rejected := make([]bool, len(pending))
+
+		// Add rejection messages for unauthorized calls
+		for i, auth := range authorized {
+			if i >= len(pending) {
+				break
+			}
+			if !auth {
+				rejected[i] = true
+				s.messages = append(s.messages, openai.ChatCompletionMessage{
+					Role:       openai.ChatMessageRoleTool,
+					Content:    "用户拒绝了此工具调用",
+					ToolCallID: pending[i].ID,
+				})
+			}
+		}
+
+		// Execute non-commit tools in parallel
+		var wg sync.WaitGroup
+		for i, tc := range pending {
+			if i >= len(authorized) {
+				break
+			}
+			if rejected[i] {
+				continue
+			}
+			if tc.Name == "git_commit" || tc.Name == "git_commit_amend" {
+				continue
+			}
+			wg.Add(1)
+			go func(idx int, call PendingToolCall) {
+				defer wg.Done()
+				results[idx] = execResult{index: idx, result: s.executeToolCallWithLimit(call.Name, call.ArgsJSON)}
+			}(i, tc)
+		}
+		wg.Wait()
+
+		// Execute commit tools sequentially
+		for i, tc := range pending {
+			if i >= len(authorized) {
+				break
+			}
+			if rejected[i] {
+				continue
+			}
+			if tc.Name != "git_commit" && tc.Name != "git_commit_amend" {
+				continue
+			}
+			results[i] = execResult{index: i, result: s.executeToolCallWithLimit(tc.Name, tc.ArgsJSON)}
+		}
+
+		// Append results in original order
+		for _, r := range results {
+			if r.result == "" && rejected[r.index] {
+				continue
+			}
+			tc := pending[r.index]
+			s.toolResults = append(s.toolResults, ToolCallResult{
+				ToolName: tc.Name,
+				Args:     json.RawMessage(tc.ArgsJSON),
+				Result:   r.result,
+			})
+
+			if tc.Name == "git_commit" || tc.Name == "git_commit_amend" {
+				var args struct {
+					Message string `json:"message"`
+				}
+				json.Unmarshal(json.RawMessage(tc.ArgsJSON), &args)
+				s.commitMsg = args.Message
+			}
+
 			s.messages = append(s.messages, openai.ChatCompletionMessage{
 				Role:       openai.ChatMessageRoleTool,
-				Content:    "用户拒绝了此工具调用",
+				Content:    r.result,
 				ToolCallID: tc.ID,
 			})
-			continue
 		}
-
-		result := s.executeToolCallWithLimit(tc.Name, tc.ArgsJSON)
-		s.toolResults = append(s.toolResults, ToolCallResult{
-			ToolName: tc.Name,
-			Args:     json.RawMessage(tc.ArgsJSON),
-			Result:   result,
-		})
-
-		if tc.Name == "git_commit" || tc.Name == "git_commit_amend" {
-			var args struct {
-				Message string `json:"message"`
-			}
-			json.Unmarshal(json.RawMessage(tc.ArgsJSON), &args)
-			s.commitMsg = args.Message
-		}
-
-		s.messages = append(s.messages, openai.ChatCompletionMessage{
-			Role:       openai.ChatMessageRoleTool,
-			Content:    result,
-			ToolCallID: tc.ID,
-		})
-	}
 
 	committed := false
 	commitFailed := false
@@ -553,19 +611,60 @@ func executeToolCall(name, argsJSON string) string {
 }
 
 func (s *CommitSession) executeToolCallWithLimit(name, argsJSON string) string {
+	cacheKey := name + ":" + argsJSON
+
+	s.mu.Lock()
+	if cached, ok := s.toolCache[cacheKey]; ok {
+		s.mu.Unlock()
+		return cached
+	}
+	s.mu.Unlock()
+
+	// For read_file: prevent re-reading the same file (wastes LLM context tokens)
+	if name == "read_file" {
+		var args struct {
+			Path string `json:"path"`
+		}
+		json.Unmarshal(json.RawMessage(argsJSON), &args)
+		if args.Path != "" {
+			s.mu.Lock()
+			if s.readFiles[args.Path] {
+				s.mu.Unlock()
+				return fmt.Sprintf("SKIPPED: %s 已在之前轮次读取，内容保留在对话历史中，请直接参考。", args.Path)
+			}
+			s.readFiles[args.Path] = true
+			s.mu.Unlock()
+		}
+	}
+
 	switch name {
 	case "list_tree":
+		s.mu.Lock()
 		if s.listTreeCalls >= s.maxListTreeCalls {
+			s.mu.Unlock()
 			return fmt.Sprintf("SKIPPED: list_tree 调用已达上限（%d）", s.maxListTreeCalls)
 		}
 		s.listTreeCalls++
+		s.mu.Unlock()
 	case "read_file":
+		s.mu.Lock()
 		if s.readFileCalls >= s.maxReadFileCalls {
+			s.mu.Unlock()
 			return fmt.Sprintf("SKIPPED: read_file 调用已达上限（%d）", s.maxReadFileCalls)
 		}
 		s.readFileCalls++
+		s.mu.Unlock()
 	}
-	return executeToolCall(name, argsJSON)
+
+	result := executeToolCall(name, argsJSON)
+
+	if name != "git_commit" && name != "git_commit_amend" {
+		s.mu.Lock()
+		s.toolCache[cacheKey] = result
+		s.mu.Unlock()
+	}
+
+	return result
 }
 
 func envIntOrDefault(key string, def int) int {
@@ -736,6 +835,7 @@ func buildAuthSystemPrompt(conventionInfo git.ConventionInfo, scopeHints []strin
 	}
 
 	b.WriteString("【执行规则】\n")
+	b.WriteString("- 每个文件只调用一次 read_file，工具结果在对话历史中持久保留，重复读取浪费 token\n")
 	b.WriteString("- 失败时调用 git_commit_amend，最多重试 3 次\n")
 	b.WriteString("- 不可恢复错误时不重试，返回文本说明\n\n")
 	b.WriteString("【输出格式】为避免超限截断，严格遵循：\n")
@@ -771,6 +871,7 @@ func buildAuthPrompt(diffContent, description string) string {
 	b.WriteString("\n\n")
 
 	b.WriteString("请先审查变更（建议先调用 list_tree 了解项目结构，再使用 read_file 读取相关文件），给出审查意见，然后必须调用 git_commit 工具提交。\n")
+	b.WriteString("注意：read_file 结果保留在对话历史中，勿重复读取同一文件，浪费 token。\n")
 	b.WriteString("提交成功后，在最后输出【最终提交信息】并使用 commit 代码块高亮展示，内容简洁，不要过多解释。\n")
 
 	return b.String()
@@ -792,7 +893,7 @@ func buildAuthSystemPromptCompact(conventionInfo git.ConventionInfo, scopeHints 
 		b.WriteString("Hook 约束: " + truncate(conventionInfo.HookContent, 200) + "\n")
 	}
 	
-	b.WriteString("规则：1. list_tree/read_file 无需授权 2. git_commit 需授权 3. 失败用 git_commit_amend 修正 4. 最后输出【最终提交信息】\n")
+	b.WriteString("规则：1. read_file 结果持久保留在历史中，每个文件只读一次 2. git_commit 需授权 3. 失败用 git_commit_amend 修正 4. 最后输出【最终提交信息】\n")
 	
 	return b.String()
 }
