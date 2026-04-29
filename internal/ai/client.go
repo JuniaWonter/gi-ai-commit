@@ -733,39 +733,32 @@ func buildOpenAITools() []openai.Tool {
 
 func buildGenerateSystemPrompt(conventionInfo git.ConventionInfo) string {
 	var b strings.Builder
-	b.WriteString("你是一个 Git commit message 生成助手。\n")
-	b.WriteString("你的职责是根据代码变更生成合适的 commit message。\n")
-	b.WriteString("只返回 commit message 内容，不要其他说明。\n")
-	b.WriteString("不要调用任何工具，直接返回文本。\n\n")
-	b.WriteString("必须遵循 Conventional Commits 1.0.0 规范：\n")
-	b.WriteString("1. 标题格式：<type>(<scope>): <subject>，scope 可选\n")
-	b.WriteString("2. 允许的 type：feat, fix, docs, style, refactor, perf, test, build, ci, chore, revert\n")
-	b.WriteString("3. subject 使用中文，简洁明确，避免空泛词（如\"修改\"、\"调整\"）\n")
-	b.WriteString("4. 标题尽量不超过 72 个字符\n")
-	b.WriteString("5. 若是破坏性变更，使用 type(scope)!: subject 或在 footer 使用 BREAKING CHANGE:\n")
-	b.WriteString("6. 只基于本次变更生成，不编造未发生的改动\n\n")
+	b.WriteString("你是 Git commit 生成助手。根据代码变更生成 Conventional Commits 消息，直接返回文本，不调用工具。\n\n")
+	b.WriteString("格式: <type>(<scope>): <subject>\n")
+	b.WriteString("type: feat|fix|docs|style|refactor|perf|test|build|ci|chore|revert\n")
+	b.WriteString("scope: 可选\n")
+	b.WriteString("subject: 中文，具体，≤72字符\n")
+	b.WriteString("破坏性变更: type!: 或 BREAKING CHANGE:\n")
+	b.WriteString("只基于本次变更生成，不编造未发生的改动\n\n")
 
 	if conventionInfo.HookExists {
-		b.WriteString("重要：该仓库有 commit-msg hook 约束！\n")
-		b.WriteString("Hook 内容摘要：\n")
+		b.WriteString("Hook 约束:\n")
 		b.WriteString(truncate(conventionInfo.HookContent, 800))
 		b.WriteString("\n\n")
-		b.WriteString("你必须确保 commit message 符合 hook 要求。\n\n")
 	}
 
 	if conventionInfo.TemplateExists {
-		b.WriteString("该仓库有 commit message 模板：\n")
+		b.WriteString("Commit 模板:\n")
 		b.WriteString(conventionInfo.TemplateContent)
 		b.WriteString("\n\n")
-		b.WriteString("请参考模板格式生成。\n")
 	}
 
 	if len(conventionInfo.RecentMessages) > 0 {
-		b.WriteString("该仓库最近几次 commit message（参考风格）：\n")
+		b.WriteString("参考风格:\n")
 		for _, entry := range conventionInfo.RecentMessages {
 			b.WriteString(fmt.Sprintf("- %s\n", entry.Message))
 		}
-		b.WriteString("\n请遵循已有的风格格式。\n")
+		b.WriteString("\n")
 	}
 
 	return b.String()
@@ -774,7 +767,7 @@ func buildGenerateSystemPrompt(conventionInfo git.ConventionInfo) string {
 func buildGeneratePrompt(diffContent, description string) string {
 	var b strings.Builder
 
-	b.WriteString("请根据以下代码变更生成 commit message。\n\n")
+	b.WriteString("根据以下变更生成 commit message。\n\n")
 
 	if description != "" {
 		b.WriteString("项目描述：\n")
@@ -784,70 +777,53 @@ func buildGeneratePrompt(diffContent, description string) string {
 
 	b.WriteString("代码变更：\n")
 	b.WriteString(diffContent)
-	b.WriteString("\n\n")
-
-	b.WriteString("要求：\n")
-	b.WriteString("1. 使用中文，只返回 commit message 内容\n")
-	b.WriteString("2. 格式：<type>(<scope>): <subject>\n")
-	b.WriteString("3. type 可选：feat, fix, docs, style, refactor, test, chore\n")
 
 	return b.String()
 }
 
 func buildAuthSystemPrompt(conventionInfo git.ConventionInfo, scopeHints []string) string {
 	var b strings.Builder
-	b.WriteString("【角色】Git commit 生成助手 + 代码审查\n\n")
-	b.WriteString("【Conventional Commits 1.0.0】\n")
+	b.WriteString("你是 Git commit 生成助手。审查代码变更后生成 Conventional Commits 消息并提交。\n\n")
+	b.WriteString("【格式】\n")
 	b.WriteString("<type>(<scope>): <subject>\n")
-	b.WriteString("- type: feat|fix|docs|style|refactor|perf|test|build|ci|chore|revert\n")
-	b.WriteString("- scope: 可选（无法判断可省略）\n")
-	b.WriteString("- subject: 中文，具体，≤72 字符\n")
-	b.WriteString("- 破坏性变更: type!: 或 BREAKING CHANGE:\n\n")
+	b.WriteString("type: feat|fix|docs|style|refactor|perf|test|build|ci|chore|revert\n")
+	b.WriteString("scope: 可选，无法判断可省略\n")
+	b.WriteString("subject: 中文，具体，≤72字符\n")
+	b.WriteString("破坏性变更: type!: 或 BREAKING CHANGE:\n")
 
 	if len(scopeHints) > 0 {
-		b.WriteString("【推荐 scope】")
+		b.WriteString("推荐 scope: ")
 		for i, s := range scopeHints {
 			if i < 3 {
-				b.WriteString(s)
-				if i < 2 && i < len(scopeHints)-1 {
+				if i > 0 {
 					b.WriteString(", ")
 				}
-			}
-		}
-		b.WriteString("\n\n")
-	}
-
-	if conventionInfo.HookExists {
-		b.WriteString("【Hook 约束】\n")
-		b.WriteString(truncate(conventionInfo.HookContent, 300))
-		b.WriteString("\n\n")
-	}
-
-
-	if len(conventionInfo.RecentMessages) > 0 {
-		b.WriteString("【参考风格】\n")
-		for i, entry := range conventionInfo.RecentMessages {
-			if i < 1 {
-				b.WriteString(fmt.Sprintf("%s\n", entry.Message))
+				b.WriteString(s)
 			}
 		}
 		b.WriteString("\n")
 	}
 
-	b.WriteString("【执行规则】\n")
-	b.WriteString("- 每个文件只调用一次 read_file，工具结果在对话历史中持久保留，重复读取浪费 token\n")
-	b.WriteString("- 失败时调用 git_commit_amend，最多重试 3 次\n")
-	b.WriteString("- 不可恢复错误时不重试，返回文本说明\n\n")
-	b.WriteString("【输出格式】为避免超限截断，严格遵循：\n")
+	if conventionInfo.HookExists {
+		b.WriteString("Hook 约束: ")
+		b.WriteString(truncate(conventionInfo.HookContent, 300))
+		b.WriteString("\n")
+	}
+
+	if len(conventionInfo.RecentMessages) > 0 {
+		b.WriteString("参考风格: ")
+		b.WriteString(conventionInfo.RecentMessages[0].Message)
+		b.WriteString("\n")
+	}
+
+	b.WriteString("\n【规则】\n")
+	b.WriteString("- 每个文件只调用一次 read_file，结果在对话历史中持久保留，勿重复读取\n")
+	b.WriteString("- commit 失败时调用 git_commit_amend 修正，最多重试 3 次\n")
+	b.WriteString("- 不可恢复错误时不重试，直接返回说明\n")
+	b.WriteString("- 提交成功后输出：\n")
 	b.WriteString("【最终提交信息】\n")
 	b.WriteString("```commit\n")
 	b.WriteString("<type>(<scope>): <subject>\n")
-	b.WriteString("```\n")
-	b.WriteString("7. 使用中文\n")
-	b.WriteString("8. 【关键】为避免输出超限被截断，输出格式必须简洁：\n")
-	b.WriteString("【最终提交信息】\\n")
-	b.WriteString("```commit\\n")
-	b.WriteString("<type>(<scope>): <subject>\\n")
 	b.WriteString("```\n")
 
 	return b.String()
@@ -856,7 +832,7 @@ func buildAuthSystemPrompt(conventionInfo git.ConventionInfo, scopeHints []strin
 func buildAuthPrompt(diffContent, description string) string {
 	var b strings.Builder
 
-	b.WriteString("请根据以下代码变更进行代码审查并提交。\n\n")
+	b.WriteString("审查以下变更并提交。\n\n")
 
 	if description != "" {
 		b.WriteString("项目描述：\n")
@@ -865,14 +841,11 @@ func buildAuthPrompt(diffContent, description string) string {
 	}
 
 	b.WriteString("代码变更：\n")
-	// 主动截断过大的 diff（保留 4000 字符）
 	truncatedDiff := truncate(diffContent, 4000)
 	b.WriteString(truncatedDiff)
 	b.WriteString("\n\n")
 
-	b.WriteString("请先审查变更（建议先调用 list_tree 了解项目结构，再使用 read_file 读取相关文件），给出审查意见，然后必须调用 git_commit 工具提交。\n")
-	b.WriteString("注意：read_file 结果保留在对话历史中，勿重复读取同一文件，浪费 token。\n")
-	b.WriteString("提交成功后，在最后输出【最终提交信息】并使用 commit 代码块高亮展示，内容简洁，不要过多解释。\n")
+	b.WriteString("先 list_tree 了解结构，read_file 审查关键文件（勿重复读取），最后调用 git_commit 提交。\n")
 
 	return b.String()
 }
@@ -880,21 +853,20 @@ func buildAuthPrompt(diffContent, description string) string {
 // 【紧凑版】当 token 接近上限时使用，减少冗余
 func buildAuthSystemPromptCompact(conventionInfo git.ConventionInfo, scopeHints []string) string {
 	var b strings.Builder
-	b.WriteString("你是 Git commit 生成助手。分两步：\n")
-	b.WriteString("1. 调用 list_tree 看项目结构，必要时 read_file 审查相关文件\n")
-	b.WriteString("2. 生成 Conventional Commits 格式的消息并调用 git_commit\n\n")
-	b.WriteString("格式：<type>(<scope>): <subject> | type: feat/fix/docs/style/refactor/test/build/ci/chore/revert\n")
-	
+	b.WriteString("你是 Git commit 生成助手。先 list_tree 看结构，必要时 read_file 审查（每个文件只读一次），然后调用 git_commit 提交。\n")
+	b.WriteString("格式: <type>(<scope>): <subject>\n")
+	b.WriteString("type: feat|fix|docs|style|refactor|perf|test|build|ci|chore|revert\n")
+
 	if len(scopeHints) > 0 {
 		b.WriteString("推荐 scope: " + strings.Join(scopeHints[:minInt(3, len(scopeHints))], ", ") + "\n")
 	}
-	
+
 	if conventionInfo.HookExists {
-		b.WriteString("Hook 约束: " + truncate(conventionInfo.HookContent, 200) + "\n")
+		b.WriteString("Hook: " + truncate(conventionInfo.HookContent, 200) + "\n")
 	}
-	
-	b.WriteString("规则：1. read_file 结果持久保留在历史中，每个文件只读一次 2. git_commit 需授权 3. 失败用 git_commit_amend 修正 4. 最后输出【最终提交信息】\n")
-	
+
+	b.WriteString("规则: git_commit 需授权; 失败用 git_commit_amend 修正; 最后输出【最终提交信息】\n")
+
 	return b.String()
 }
 
