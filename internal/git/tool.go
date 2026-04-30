@@ -72,6 +72,14 @@ var ToolDefinitions = []ToolDefinition{
 			"required": ["message"]
 		}`),
 	},
+	{
+		Name:        "diff_overview",
+		Description: "获取变更文件的紧凑概览（git diff --stat + --name-status），了解哪些文件变更和变更量，无需读取完整 diff 内容。自动执行，无需授权。",
+		Parameters: json.RawMessage(`{
+			"type": "object",
+			"properties": {}
+		}`),
+	},
 }
 
 func FindToolDef(name string) *ToolDefinition {

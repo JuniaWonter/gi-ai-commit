@@ -489,6 +489,8 @@ func (m *CommitFlowModel) appendToolCallLines(calls []ai.PendingToolCall) {
 			m.appendLine(toolCallLineStyle.Render("📋 [git_log_recent] → 获取历史记录..."))
 		case "git_hook_check":
 			m.appendLine(toolCallLineStyle.Render("🔧 [git_hook_check] → 检查 hook..."))
+		case "diff_overview":
+			m.appendLine(toolCallLineStyle.Render("📊 [diff_overview] → 获取变更概览..."))
 		case "git_config_get":
 			key := tc.ArgString("key")
 			m.appendLine(toolCallLineStyle.Render(fmt.Sprintf("⚙️  [git_config_get] %s → 查询中...", key)))
