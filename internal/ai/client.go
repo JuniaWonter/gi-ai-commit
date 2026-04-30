@@ -214,14 +214,16 @@ func (c *Client) StartCommitSession(diffContent, description string, conventionI
 
 func (s *CommitSession) StreamAI(send func(chunk StreamChunk)) ([]PendingToolCall, error) {
 	s.streaming = true
-	maxTokens := envIntOrDefault("GIT_AI_MAX_COMPLETION_TOKENS", 4096)
+	maxTokens := envIntOrDefault("GIT_AI_MAX_COMPLETION_TOKENS", 0)
 	req := openai.ChatCompletionRequest{
-		Model:                s.client.config.Model,
-		Messages:             s.messages,
-		Tools:                s.tools,
-		Temperature:          0.3,
-		Stream:               true,
-		MaxCompletionTokens:  maxTokens,
+		Model:    s.client.config.Model,
+		Messages: s.messages,
+		Tools:    s.tools,
+		Temperature: 0.3,
+		Stream:   true,
+	}
+	if maxTokens > 0 {
+		req.MaxCompletionTokens = maxTokens
 	}
 
 	ctx, cancel := context.WithTimeout(context.Background(), s.client.config.Timeout)
@@ -324,6 +326,12 @@ func (s *CommitSession) StreamAI(send func(chunk StreamChunk)) ([]PendingToolCal
 		// 如果被检测到输出被截断
 		if isOutputTruncated {
 			s.noToolCallFallback = true
+			// 截断时移除无效消息，启用紧凑模式重试，再失败则提取提交
+			s.messages = s.messages[:len(s.messages)-1]
+			if !s.compactMode {
+				s.compactMode = true
+				return s.StreamAI(send)
+			}
 			// 使用提取的最后一条 commit message，或默认消息
 			extractedMsg := extractCommitMessageFromTruncated(msg)
 			if extractedMsg == "" {
