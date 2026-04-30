@@ -112,6 +112,14 @@ func RunCommit(opts CommitOptions) error {
 		fmt.Println("   Message:")
 		fmt.Printf("   %s\n", strings.ReplaceAll(result.CommitMessage, "\n", "\n   "))
 	}
+	if result.IsPartial && len(result.RemainingFiles) > 0 {
+		fmt.Printf("⚠️  部分提交: 以下 %d 个文件未提交:\n", len(result.RemainingFiles))
+		for _, f := range result.RemainingFiles {
+			fmt.Printf("     • %s\n", f)
+		}
+	} else if result.CommitHash != "" {
+		fmt.Println("   ✓ 工作区干净，所有变更已提交")
+	}
 	if result.TotalTokens > 0 {
 		fmt.Printf("   Token 消耗: prompt=%d  completion=%d  total=%d\n", result.PromptTokens, result.CompletionTokens, result.TotalTokens)
 	}
