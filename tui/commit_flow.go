@@ -105,6 +105,12 @@ type CommitFlowModel struct {
 	streamContent  strings.Builder
 	streamDone     bool
 
+	// post-commit verification state
+	verifiedHash    string
+	remainingFiles  []string
+	isPartialCommit bool
+	commitVerified  bool
+
 	outputLog       strings.Builder
 	contentViewport viewport.Model
 	vpReady         bool
@@ -234,6 +240,15 @@ func (m *CommitFlowModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			if result.Success {
 				m.commitMessage = result.CommitMsg
 				m.commitHash = extractHash(result.ToolResults)
+				// 独立验证：用 git 命令确认提交真实成功
+				vResult := git.VerifyCommit()
+				m.verifiedHash = vResult.Hash
+				m.remainingFiles = append(vResult.RemainingStaged, vResult.RemainingDirty...)
+				m.isPartialCommit = vResult.IsPartial
+				m.commitVerified = vResult.Verified && vResult.Error == ""
+				if !m.commitVerified && vResult.Error != "" {
+					m.appendErrorLine(fmt.Sprintf("验证失败: %s", vResult.Error))
+				}
 			}
 			m.phase = phaseDone
 			m.refreshViewport()
@@ -420,8 +435,20 @@ func (m *CommitFlowModel) refreshViewport() {
 	if m.phase == phaseDone {
 		if m.commitMessage != "" {
 			vis += "\n" + successLineStyle.Render("✓ 提交成功")
-			if m.commitHash != "" {
-				vis += "\n" + toolCallLineStyle.Render(fmt.Sprintf("提交哈希: %s", m.commitHash))
+			if m.verifiedHash != "" {
+				vis += "\n" + toolCallLineStyle.Render(fmt.Sprintf("提交哈希: %s", m.verifiedHash))
+			} else if m.commitHash != "" {
+				vis += "\n" + toolCallLineStyle.Render(fmt.Sprintf("AI 报告哈希: %s", m.commitHash))
+			}
+			if m.commitVerified {
+				if m.isPartialCommit {
+					vis += "\n" + lipgloss.NewStyle().PaddingLeft(1).Foreground(lipgloss.Color("220")).Render("⚠ 部分提交: 仍有文件未提交")
+					for _, f := range m.remainingFiles {
+						vis += "\n" + toolCallLineStyle.Render(fmt.Sprintf("  • %s", f))
+					}
+				} else {
+					vis += "\n" + toolCallLineStyle.Render("状态: 工作区干净")
+				}
 			}
 			msgBox := lipgloss.NewStyle().
 				Border(lipgloss.RoundedBorder()).
@@ -705,14 +732,23 @@ func (m *CommitFlowModel) GetResult() CommitFlowResult {
 		}
 	}
 	result := m.session.GetResult()
+
+	// 优先使用验证后的 hash（比 AI 报告的更可靠）
+	hash := m.verifiedHash
+	if hash == "" {
+		hash = m.commitHash
+	}
+
 	return CommitFlowResult{
 		Success:          m.commitMessage != "",
 		CommitMessage:    m.commitMessage,
-		CommitHash:       m.commitHash,
+		CommitHash:       hash,
 		SelectedFiles:    m.selectedFiles,
 		PromptTokens:     result.PromptTokens,
 		CompletionTokens: result.CompletionTokens,
 		TotalTokens:      result.TotalTokens,
+		IsPartial:        m.isPartialCommit,
+		RemainingFiles:   m.remainingFiles,
 	}
 }
 
@@ -724,6 +760,8 @@ type CommitFlowResult struct {
 	PromptTokens     int
 	CompletionTokens int
 	TotalTokens      int
+	IsPartial        bool
+	RemainingFiles   []string
 }
 
 var hashRe = regexp.MustCompile(`SUCCESS[^\n]*?([0-9a-f]{7,40})`)

@@ -107,6 +107,83 @@ func parseCommitHash(output string) string {
 	return ""
 }
 
+// VerifiedCommitResult holds the result of post-commit verification.
+type VerifiedCommitResult struct {
+	Hash            string   // verified HEAD hash
+	RemainingStaged []string // files still staged after commit (unexpected)
+	RemainingDirty  []string // files with unstaged modifications
+	UntrackedFiles  []string // untracked files
+	IsPartial       bool     // true if there are remaining dirty files
+	Verified        bool     // true if verification ran successfully
+	Error           string   // error message if verification failed
+}
+
+// VerifyCommit runs git commands to independently verify that a commit was made
+// and reports the current state of the working tree.
+func VerifyCommit() VerifiedCommitResult {
+	gitRoot, err := getGitRoot()
+	if err != nil {
+		return VerifiedCommitResult{Error: err.Error()}
+	}
+
+	// Get current HEAD hash
+	headCmd := exec.Command("git", "rev-parse", "HEAD")
+	headCmd.Dir = gitRoot
+	headOut, err := headCmd.Output()
+	if err != nil {
+		return VerifiedCommitResult{Error: fmt.Sprintf("获取 HEAD 失败：%v", err)}
+	}
+	hash := strings.TrimSpace(string(headOut))
+	if hash == "" {
+		return VerifiedCommitResult{Error: "HEAD 为空，提交可能未创建"}
+	}
+
+	// Check remaining staged files (should be empty after successful commit)
+	stagedCmd := exec.Command("git", "diff", "--cached", "--name-only")
+	stagedCmd.Dir = gitRoot
+	stagedOut, _ := stagedCmd.Output()
+	var remainingStaged []string
+	for _, f := range strings.Split(strings.TrimSpace(string(stagedOut)), "\n") {
+		if f = strings.TrimSpace(f); f != "" {
+			remainingStaged = append(remainingStaged, f)
+		}
+	}
+
+	// Check unstaged modified files
+	dirtyCmd := exec.Command("git", "diff", "--name-only")
+	dirtyCmd.Dir = gitRoot
+	dirtyOut, _ := dirtyCmd.Output()
+	var remainingDirty []string
+	for _, f := range strings.Split(strings.TrimSpace(string(dirtyOut)), "\n") {
+		if f = strings.TrimSpace(f); f != "" {
+			remainingDirty = append(remainingDirty, f)
+		}
+	}
+
+	// Check untracked files
+	untrackedCmd := exec.Command("git", "ls-files", "--others", "--exclude-standard")
+	untrackedCmd.Dir = gitRoot
+	untrackedOut, _ := untrackedCmd.Output()
+	var untrackedFiles []string
+	for _, f := range strings.Split(strings.TrimSpace(string(untrackedOut)), "\n") {
+		if f = strings.TrimSpace(f); f != "" {
+			untrackedFiles = append(untrackedFiles, f)
+		}
+	}
+
+	isPartial := len(remainingDirty) > 0
+
+	return VerifiedCommitResult{
+		Hash:            hash,
+		RemainingStaged: remainingStaged,
+		RemainingDirty:  remainingDirty,
+		UntrackedFiles:  untrackedFiles,
+		IsPartial:       isPartial,
+		Verified:        true,
+		Error:           "",
+	}
+}
+
 func ResetLastCommit() CommitResult {
 	gitRoot, err := getGitRoot()
 	if err != nil {
