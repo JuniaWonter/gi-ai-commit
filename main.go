@@ -51,7 +51,7 @@ func main() {
 		}
 
 	case "version", "-v", "--version":
-		fmt.Printf("git-ai-commit version %s\n", version)
+		showVersion()
 
 	case "help", "-h", "--help":
 		printUsage()
@@ -87,4 +87,9 @@ func printUsage() {
 
 配置文件:
   ~/.config/ai-commit/config.yaml`)
+}
+
+// show me your version
+func showVersion() {
+	fmt.Printf("git-ai-commit version %s\n", version)
 }
