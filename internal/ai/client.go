@@ -486,6 +486,23 @@ func (s *CommitSession) ExecuteAndResumeWithStream(pending []PendingToolCall, au
 		return nil, nil
 	}
 
+	// 【二次验证】即使 AI 报告 FAILED，git 可能因 hook 警告等非零退出但提交已成功
+	// 用独立 git 命令确认，避免误判
+	if commitFailed {
+		vResult := git.VerifyCommit()
+		if vResult.Error == "" && vResult.Hash != "" {
+			// 提交实际已成功，更新 tool result 以便后续流程正确处理
+			for i, tr := range s.toolResults {
+				if tr.ToolName == "git_commit" || tr.ToolName == "git_commit_amend" {
+					if !strings.Contains(tr.Result, "SUCCESS") {
+						s.toolResults[i].Result = fmt.Sprintf("SUCCESS: 提交成功 %s", vResult.Hash)
+					}
+				}
+			}
+			return nil, nil
+		}
+	}
+
 	s.loopCount++
 	if commitFailed {
 		s.retryCount++
@@ -494,7 +511,18 @@ func (s *CommitSession) ExecuteAndResumeWithStream(pending []PendingToolCall, au
 }
 
 func (s *CommitSession) GetResult() CommitResult {
-	if s.commitMsg != "" {
+	// 检查 tool results 中是否有成功的提交
+	committed := false
+	for _, tr := range s.toolResults {
+		if tr.ToolName == "git_commit" || tr.ToolName == "git_commit_amend" {
+			if strings.Contains(tr.Result, "SUCCESS") {
+				committed = true
+				break
+			}
+		}
+	}
+
+	if committed && s.commitMsg != "" {
 		return CommitResult{
 			Success:          true,
 			CommitMsg:        s.commitMsg,
