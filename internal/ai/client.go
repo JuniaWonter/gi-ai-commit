@@ -297,6 +297,11 @@ func (s *CommitSession) StreamAI(send func(chunk StreamChunk)) ([]PendingToolCal
 	send(StreamChunk{Done: true})
 	s.streaming = false
 
+	// 如果流式响应未返回 token 用量（部分 API 提供商不支持），用本地估算兜底
+	if s.totalTokens == 0 {
+		s.fillFallbackTokenEstimate(fullContent.String())
+	}
+
 	// Build the assistant message
 	assistantMsg := openai.ChatCompletionMessage{
 		Role:    openai.ChatMessageRoleAssistant,
@@ -542,6 +547,21 @@ func (s *CommitSession) GetResult() CommitResult {
 	}
 }
 
+// fillFallbackTokenEstimate 在 API 未返回 token 用量时，用本地估算作为兜底
+func (s *CommitSession) fillFallbackTokenEstimate(outputContent string) {
+	var inputText strings.Builder
+	for _, msg := range s.messages {
+		inputText.WriteString(msg.Content)
+		for _, tc := range msg.ToolCalls {
+			inputText.WriteString(tc.Function.Name)
+			inputText.WriteString(tc.Function.Arguments)
+		}
+	}
+	s.promptTokens = estimateTokenCount(inputText.String())
+	s.completionTokens = estimateTokenCount(outputContent)
+	s.totalTokens = s.promptTokens + s.completionTokens
+}
+
 func executeToolCall(name, argsJSON string) string {
 	switch name {
 	case "list_tree":
@@ -632,6 +652,9 @@ func executeToolCall(name, argsJSON string) string {
 			return fmt.Sprintf("NOT_FOUND: 配置项 %s 不存在", args.Key)
 		}
 		return fmt.Sprintf("VALUE: %s=%s", args.Key, val)
+
+	case "diff_overview":
+		return git.GetDiffOverview()
 
 	default:
 		return fmt.Sprintf("ERROR: 未知工具 %s", name)
@@ -845,7 +868,10 @@ func buildAuthSystemPrompt(conventionInfo git.ConventionInfo, scopeHints []strin
 	}
 
 	b.WriteString("\n【规则】\n")
+	b.WriteString("- 先 diff_overview 看变更概览，再根据需要决定是否 read_file\n")
+	b.WriteString("- read_file 优先用 start_line/end_line 指定范围，只读关键部分\n")
 	b.WriteString("- 每个文件只调用一次 read_file，结果在对话历史中持久保留，勿重复读取\n")
+	b.WriteString("- list_tree 默认 depth=1，仅在需要时增加\n")
 	b.WriteString("- commit 失败时调用 git_commit_amend 修正，最多重试 3 次\n")
 	b.WriteString("- 不可恢复错误时不重试，直接返回说明\n")
 	b.WriteString("- 提交成功后输出：\n")
@@ -873,7 +899,7 @@ func buildAuthPrompt(diffContent, description string) string {
 	b.WriteString(truncatedDiff)
 	b.WriteString("\n\n")
 
-	b.WriteString("先 list_tree 了解结构，read_file 审查关键文件（勿重复读取），最后调用 git_commit 提交。\n")
+	b.WriteString("先用 diff_overview 了解变更概览，再 read_file 审查关键部分（指定行范围，勿读整个文件），最后 git_commit。\n")
 
 	return b.String()
 }
@@ -881,7 +907,7 @@ func buildAuthPrompt(diffContent, description string) string {
 // 【紧凑版】当 token 接近上限时使用，减少冗余
 func buildAuthSystemPromptCompact(conventionInfo git.ConventionInfo, scopeHints []string) string {
 	var b strings.Builder
-	b.WriteString("你是 Git commit 生成助手。先 list_tree 看结构，必要时 read_file 审查（每个文件只读一次），然后调用 git_commit 提交。\n")
+	b.WriteString("你是 Git commit 生成助手。先 diff_overview 看概览，再 read_file（指定行范围），最后 git_commit。\n")
 	b.WriteString("格式: <type>(<scope>): <subject>\n")
 	b.WriteString("type: feat|fix|docs|style|refactor|perf|test|build|ci|chore|revert\n")
 
