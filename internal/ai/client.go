@@ -851,10 +851,10 @@ func buildAuthSystemPrompt(conventionInfo git.ConventionInfo, scopeHints []strin
 	b.WriteString("- 性能问题：不必要的循环、重复查询\n")
 	b.WriteString("- 错误处理：异常未捕获、降级缺失\n")
 	b.WriteString("- 可维护性：魔法数字、过度耦合\n")
-	b.WriteString("审查结果用 1-2 行输出，不超过 200 字。\n\n")
+	b.WriteString("审查结果简明扼要，重点突出风险项。\n\n")
 
 	b.WriteString("【执行顺序】\n")
-	b.WriteString("1. 审查变更（输出 1-2 行评审意见，无问题则跳过）\n")
+	b.WriteString("1. 审查变更（识别风险，输出审查意见）\n")
 	b.WriteString("2. 调用 git_commit 提交（这是最终目标）\n")
 	b.WriteString("3. 提交成功后输出 【最终提交信息】\n\n")
 
@@ -891,7 +891,7 @@ func buildAuthSystemPrompt(conventionInfo git.ConventionInfo, scopeHints []strin
 	}
 
 	b.WriteString("\n【规则】\n")
-	b.WriteString("- 审查输出≤200字，无风险直接跳过\n")
+	b.WriteString("- 识别风险后输出审查意见，无风险直接跳过\n")
 	b.WriteString("- 先 diff_overview 看概览，再 read_file（指定行）\n")
 	b.WriteString("- 每个文件只读一次，结果持久保留\n")
 	b.WriteString("- list_tree 默认 depth=1\n")
@@ -909,7 +909,7 @@ func buildAuthSystemPrompt(conventionInfo git.ConventionInfo, scopeHints []strin
 func buildAuthPrompt(diffContent, description string) string {
 	var b strings.Builder
 
-	b.WriteString("审查以下变更（1-2行意见），然后调用 git_commit。\n\n")
+	b.WriteString("审查以下变更，识别风险后调用 git_commit。\n\n")
 
 	if description != "" {
 		b.WriteString("项目描述：\n")
@@ -944,7 +944,7 @@ func buildAuthSystemPromptCompact(conventionInfo git.ConventionInfo, scopeHints 
 		b.WriteString("Hook: " + truncate(conventionInfo.HookContent, 200) + "\n")
 	}
 
-	b.WriteString("规则: 审查≤200字; git_commit 是目标; 失败用 amend 修正\n")
+	b.WriteString("规则: 有风险则审查; git_commit 是目标; 失败用 amend 修正\n")
 
 	return b.String()
 }
@@ -959,7 +959,7 @@ func buildAuthPromptCompact(diffContent, description string) string {
 	b.WriteString(truncatedDiff)
 	b.WriteString("\n\n")
 
-	b.WriteString("审查（≤200字），然后提交。\n")
+	b.WriteString("审查变更，然后提交。\n")
 	
 	return b.String()
 }
