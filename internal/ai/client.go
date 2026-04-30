@@ -214,7 +214,7 @@ func (c *Client) StartCommitSession(diffContent, description string, conventionI
 
 func (s *CommitSession) StreamAI(send func(chunk StreamChunk)) ([]PendingToolCall, error) {
 	s.streaming = true
-	maxTokens := envIntOrDefault("GIT_AI_MAX_COMPLETION_TOKENS", 2000)
+	maxTokens := envIntOrDefault("GIT_AI_MAX_COMPLETION_TOKENS", 4096)
 	req := openai.ChatCompletionRequest{
 		Model:                s.client.config.Model,
 		Messages:             s.messages,
@@ -834,12 +834,27 @@ func buildGeneratePrompt(diffContent, description string) string {
 
 func buildAuthSystemPrompt(conventionInfo git.ConventionInfo, scopeHints []string) string {
 	var b strings.Builder
-	b.WriteString("你是 Git commit 生成助手。审查代码变更后生成 Conventional Commits 消息并提交。\n\n")
-	b.WriteString("【格式】\n")
+	b.WriteString("你是资深代码审查助手。审查 → 提交，两步完成。\n\n")
+
+	b.WriteString("【审查要点】\n")
+	b.WriteString("识别以下问题，无风险则跳过：\n")
+	b.WriteString("- 逻辑缺陷：边界条件、竞态、状态转换\n")
+	b.WriteString("- 安全隐患：注入、XSS、权限泄露\n")
+	b.WriteString("- 性能问题：不必要的循环、重复查询\n")
+	b.WriteString("- 错误处理：异常未捕获、降级缺失\n")
+	b.WriteString("- 可维护性：魔法数字、过度耦合\n")
+	b.WriteString("审查结果用 1-2 行输出，不超过 200 字。\n\n")
+
+	b.WriteString("【执行顺序】\n")
+	b.WriteString("1. 审查变更（输出 1-2 行评审意见，无问题则跳过）\n")
+	b.WriteString("2. 调用 git_commit 提交（这是最终目标）\n")
+	b.WriteString("3. 提交成功后输出 【最终提交信息】\n\n")
+
+	b.WriteString("【Commit 格式】\n")
 	b.WriteString("<type>(<scope>): <subject>\n")
 	b.WriteString("type: feat|fix|docs|style|refactor|perf|test|build|ci|chore|revert\n")
-	b.WriteString("scope: 可选，无法判断可省略\n")
-	b.WriteString("subject: 中文，具体，≤72字符\n")
+	b.WriteString("scope: 可选\n")
+	b.WriteString("subject: 中文，具体，≤50字符\n")
 	b.WriteString("破坏性变更: type!: 或 BREAKING CHANGE:\n")
 
 	if len(scopeHints) > 0 {
@@ -868,13 +883,13 @@ func buildAuthSystemPrompt(conventionInfo git.ConventionInfo, scopeHints []strin
 	}
 
 	b.WriteString("\n【规则】\n")
-	b.WriteString("- 先 diff_overview 看变更概览，再根据需要决定是否 read_file\n")
-	b.WriteString("- read_file 优先用 start_line/end_line 指定范围，只读关键部分\n")
-	b.WriteString("- 每个文件只调用一次 read_file，结果在对话历史中持久保留，勿重复读取\n")
-	b.WriteString("- list_tree 默认 depth=1，仅在需要时增加\n")
-	b.WriteString("- commit 失败时调用 git_commit_amend 修正，最多重试 3 次\n")
-	b.WriteString("- 不可恢复错误时不重试，直接返回说明\n")
-	b.WriteString("- 提交成功后输出：\n")
+	b.WriteString("- 审查输出≤200字，无风险直接跳过\n")
+	b.WriteString("- 先 diff_overview 看概览，再 read_file（指定行）\n")
+	b.WriteString("- 每个文件只读一次，结果持久保留\n")
+	b.WriteString("- list_tree 默认 depth=1\n")
+	b.WriteString("- git_commit 是最终目标，失败用 amend 修正，最多 3 次\n")
+	b.WriteString("- 不可恢复错误时不重试\n")
+	b.WriteString("- 提交后输出：\n")
 	b.WriteString("【最终提交信息】\n")
 	b.WriteString("```commit\n")
 	b.WriteString("<type>(<scope>): <subject>\n")
@@ -886,7 +901,7 @@ func buildAuthSystemPrompt(conventionInfo git.ConventionInfo, scopeHints []strin
 func buildAuthPrompt(diffContent, description string) string {
 	var b strings.Builder
 
-	b.WriteString("审查以下变更并提交。\n\n")
+	b.WriteString("审查以下变更（1-2行意见），然后调用 git_commit。\n\n")
 
 	if description != "" {
 		b.WriteString("项目描述：\n")
@@ -907,8 +922,10 @@ func buildAuthPrompt(diffContent, description string) string {
 // 【紧凑版】当 token 接近上限时使用，减少冗余
 func buildAuthSystemPromptCompact(conventionInfo git.ConventionInfo, scopeHints []string) string {
 	var b strings.Builder
-	b.WriteString("你是 Git commit 生成助手。先 diff_overview 看概览，再 read_file（指定行范围），最后 git_commit。\n")
-	b.WriteString("格式: <type>(<scope>): <subject>\n")
+	b.WriteString("你是代码审查助手。分析变更 → 输出审查意见（风险/建议）→ 提交。\n")
+	b.WriteString("审查要点：逻辑缺陷、安全隐患、性能、错误处理、可维护性\n\n")
+	b.WriteString("先 diff_overview 看概览，再 read_file（指定行范围），最后 git_commit。\n")
+	b.WriteString("Commit 格式: <type>(<scope>): <subject>\n")
 	b.WriteString("type: feat|fix|docs|style|refactor|perf|test|build|ci|chore|revert\n")
 
 	if len(scopeHints) > 0 {
@@ -919,7 +936,7 @@ func buildAuthSystemPromptCompact(conventionInfo git.ConventionInfo, scopeHints 
 		b.WriteString("Hook: " + truncate(conventionInfo.HookContent, 200) + "\n")
 	}
 
-	b.WriteString("规则: git_commit 需授权; 失败用 git_commit_amend 修正; 最后输出【最终提交信息】\n")
+	b.WriteString("规则: 审查≤200字; git_commit 是目标; 失败用 amend 修正\n")
 
 	return b.String()
 }
@@ -933,8 +950,8 @@ func buildAuthPromptCompact(diffContent, description string) string {
 	truncatedDiff := truncateCompact(diffContent, 2000)
 	b.WriteString(truncatedDiff)
 	b.WriteString("\n\n")
-	
-	b.WriteString("生成 commit message 并调用 git_commit。\n")
+
+	b.WriteString("审查（≤200字），然后提交。\n")
 	
 	return b.String()
 }
