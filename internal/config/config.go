@@ -21,10 +21,11 @@ type AIConfig struct {
 }
 
 type ModelConfig struct {
-	APIKey  string `yaml:"api_key"`
-	Model   string `yaml:"model"`
-	BaseURL string `yaml:"base_url"`
-	Timeout string `yaml:"timeout"`
+	APIKey        string `yaml:"api_key"`
+	Model         string `yaml:"model"`
+	BaseURL       string `yaml:"base_url"`
+	Timeout       string `yaml:"timeout"`
+	ContextWindow int    `yaml:"context_window"`
 }
 
 type CommitConfig struct {

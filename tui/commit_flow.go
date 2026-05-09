@@ -4,6 +4,7 @@ import (
 	"fmt"
 	"os"
 	"os/exec"
+	"regexp"
 	"strings"
 	"sync"
 
@@ -43,10 +44,10 @@ type stageDoneMsg struct {
 
 var (
 	phaseHeaderStyle = lipgloss.NewStyle().
-		Bold(true).
-		Foreground(lipgloss.Color("63")).
-		Background(lipgloss.Color("235")).
-		Padding(0, 2)
+				Bold(true).
+				Foreground(lipgloss.Color("63")).
+				Background(lipgloss.Color("235")).
+				Padding(0, 2)
 
 	spinnerStyle = lipgloss.NewStyle().
 			Foreground(lipgloss.Color("63"))
@@ -64,29 +65,39 @@ var (
 			Foreground(lipgloss.Color("1")).
 			Bold(true).
 			PaddingLeft(1)
+
+	thinkingStyle = lipgloss.NewStyle().
+			Foreground(lipgloss.Color("243")).
+			PaddingLeft(1)
+
+	separatorStyle = lipgloss.NewStyle().
+			Foreground(lipgloss.Color("237")).
+			PaddingLeft(1)
 )
 
 type CommitFlowOptions struct {
-	AutoConfirm bool
-	DryRun      bool
-	Desc        string
-	DiffCfg     diff.DiffPromptConfig
-	GitRoot     string
-	Client      *ai.Client
+	AutoConfirm     bool
+	DryRun          bool
+	DescFunc        func() string // lazy description, blocks until ready
+	DiffCfg         diff.DiffPromptConfig
+	GitRoot         string
+	Client          *ai.Client
+	ContinueSession *ai.PersistableSession // 不为 nil 时跳过文件选择，使用 continue 会话
 }
 
 type CommitFlowModel struct {
-	phase        phase
-	opts         CommitFlowOptions
-	files        []diff.FileChange
-	fileSelector *FileSelector
-	spinner      spinner.Model
-	termWidth    int
-	termHeight   int
-	ready        bool
+	phase           phase
+	opts            CommitFlowOptions
+	files           []diff.FileChange
+	fileSelector    *FileSelector
+	spinner         spinner.Model
+	termWidth       int
+	termHeight      int
+	ready           bool
 	stageInProgress bool
 
 	session        *ai.CommitSession
+	continueSess   *ai.PersistableSession // --continue 时加载的持久化会话
 	pendingCalls   []ai.PendingToolCall
 	commitMessage  string
 	commitHash     string
@@ -95,7 +106,7 @@ type CommitFlowModel struct {
 	originalStaged []string
 	streamChan     chan tea.Msg
 	streamDoneCh   chan struct{} // signals goroutines to exit
-	streamDoneOnce sync.Once    // prevents double-close on streamDoneCh
+	streamDoneOnce sync.Once     // prevents double-close on streamDoneCh
 
 	stagedDiffContent string // diff of staged files, set after startStageCmd
 	stagedDiffMode    string
@@ -104,11 +115,21 @@ type CommitFlowModel struct {
 	streamContent  strings.Builder
 	streamDone     bool
 
-	outputLog       strings.Builder
-	contentViewport viewport.Model
-	vpReady         bool
-	awaitingConfirm  bool
-	userAuthorizedCommit bool
+	toolRunNames    []string // current executing tool names (shown with spinner)
+
+	// post-commit verification state
+	verifiedHash    string
+	remainingFiles  []string
+	isPartialCommit bool
+	commitVerified  bool
+
+	outputLog                strings.Builder
+	reviewOutput             strings.Builder // 持久化的 AI review 内容（markdown 渲染）
+	contentViewport          viewport.Model
+	vpReady                  bool
+	awaitingConfirm          bool
+	awaitingSummarizeConfirm bool
+	userAuthorizedCommit     bool
 }
 
 func NewCommitFlowModel(files []diff.FileChange, opts CommitFlowOptions) *CommitFlowModel {
@@ -123,6 +144,7 @@ func NewCommitFlowModel(files []diff.FileChange, opts CommitFlowOptions) *Commit
 		files:        files,
 		fileSelector: fs,
 		spinner:      s,
+		continueSess: opts.ContinueSession,
 		streamDoneCh: make(chan struct{}),
 	}
 
@@ -174,6 +196,7 @@ func (m *CommitFlowModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		if !m.vpReady {
 			m.contentViewport = viewport.New(msg.Width, contentH)
 			m.contentViewport.Style = lipgloss.NewStyle().Padding(0, 1)
+			m.contentViewport.MouseWheelEnabled = true
 			m.vpReady = true
 		} else {
 			m.contentViewport.Width = msg.Width
@@ -233,14 +256,35 @@ func (m *CommitFlowModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			if result.Success {
 				m.commitMessage = result.CommitMsg
 				m.commitHash = extractHash(result.ToolResults)
+				// 独立验证：用 git 命令确认提交真实成功
+				vResult := git.VerifyCommit()
+				m.verifiedHash = vResult.Hash
+				m.remainingFiles = append(vResult.RemainingStaged, vResult.RemainingDirty...)
+				m.isPartialCommit = vResult.IsPartial
+				m.commitVerified = vResult.Verified && vResult.Error == ""
+				if !m.commitVerified && vResult.Error != "" {
+					m.appendErrorLine(fmt.Sprintf("验证失败: %s", vResult.Error))
+				}
+				// 保存会话用于未来的 --continue
+				if err := m.session.SaveSession(); err != nil {
+					debug.Logf("保存会话失败: %v", err)
+				}
 			}
+			m.flushStreamToOutput()
 			m.phase = phaseDone
 			m.refreshViewport()
 			return m, nil
 		}
 		m.pendingCalls = msg.pending
+		m.flushStreamToOutput()
 		if m.hasCommitCall() && !m.opts.AutoConfirm {
 			m.awaitingConfirm = true
+			m.refreshViewport()
+			return m, nil
+		}
+		if m.hasSummarizeCall() && !m.opts.AutoConfirm {
+			m.awaitingConfirm = true
+			m.awaitingSummarizeConfirm = true
 			m.refreshViewport()
 			return m, nil
 		}
@@ -250,8 +294,7 @@ func (m *CommitFlowModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 
 	case stageDoneMsg:
 		m.stageInProgress = false
-		// 防止重复处理
-		if m.phase == phaseDone || m.phase == phaseStreaming {
+		if m.phase == phaseDone {
 			return m, nil
 		}
 		if msg.success {
@@ -302,22 +345,36 @@ func (m *CommitFlowModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			switch s {
 			case "enter":
 				if m.awaitingConfirm {
+					isSummarize := m.awaitingSummarizeConfirm
 					m.awaitingConfirm = false
+					m.awaitingSummarizeConfirm = false
 					m.userAuthorizedCommit = true
-					m.appendLine("→ 已确认提交，执行中...")
+					if isSummarize {
+						m.appendLine("→ 已确认，进入审查和提交阶段...")
+					} else {
+						m.appendLine("→ 已确认提交，执行中...")
+					}
 					m.refreshViewport()
 					return m, m.execPendingCmd()
 				}
 			case "y", "Y":
 				if m.awaitingConfirm {
+					isSummarize := m.awaitingSummarizeConfirm
 					m.awaitingConfirm = false
+					m.awaitingSummarizeConfirm = false
 					m.userAuthorizedCommit = true
-					m.appendLine("→ 确认提交，执行中...")
+					if isSummarize {
+						m.appendLine("→ 确认，进入审查和提交阶段...")
+					} else {
+						m.appendLine("→ 确认提交，执行中...")
+					}
 					m.refreshViewport()
 					return m, m.execPendingCmd()
 				}
 			case "n", "N":
 				if m.awaitingConfirm {
+					m.awaitingConfirm = false
+					m.awaitingSummarizeConfirm = false
 					m.appendLine("→ 用户取消提交")
 					m.phase = phaseDone
 					m.refreshViewport()
@@ -325,6 +382,8 @@ func (m *CommitFlowModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 				}
 			case "esc":
 				if m.awaitingConfirm {
+					m.awaitingConfirm = false
+					m.awaitingSummarizeConfirm = false
 					m.appendLine("→ 用户取消提交")
 					m.phase = phaseDone
 					m.refreshViewport()
@@ -352,6 +411,8 @@ func (m *CommitFlowModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		})
 
 	case phaseDone:
+		var doneCmd tea.Cmd
+		m.contentViewport, doneCmd = m.contentViewport.Update(msg)
 		switch msg := msg.(type) {
 		case tea.KeyMsg:
 			if msg.Type == tea.KeyEnter || msg.Type == tea.KeyEscape || msg.String() == "q" || msg.String() == "ctrl+c" {
@@ -359,7 +420,7 @@ func (m *CommitFlowModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 				return m, tea.Quit
 			}
 		}
-		return m, nil
+		return m, doneCmd
 	}
 
 	return m, nil
@@ -383,60 +444,85 @@ func (m *CommitFlowModel) refreshViewport() {
 	if !m.vpReady {
 		m.contentViewport = viewport.New(w, contentH)
 		m.contentViewport.Style = lipgloss.NewStyle().Padding(0, 1)
+		m.contentViewport.MouseWheelEnabled = true
 		m.vpReady = true
 	}
 
-	vis := m.outputLog.String()
+	var vis strings.Builder
 
+	// outputLog: tool calls, status messages (already styled)
+	if m.outputLog.Len() > 0 {
+		vis.WriteString(m.outputLog.String())
+	}
+
+	// reviewOutput: flushed review content (normal display)
+	if m.reviewOutput.Len() > 0 {
+		if vis.Len() > 0 {
+			vis.WriteString("\n")
+		}
+		vis.WriteString(renderMarkdown(m.reviewOutput.String(), contentW))
+	}
+
+	// streamThinking: current thinking as dim/italic text
 	if m.streamThinking.Len() > 0 {
-		thinkingBox := lipgloss.NewStyle().
-			Border(lipgloss.RoundedBorder()).
-			BorderForeground(lipgloss.Color("241")).
-			Padding(1, 2).
-			Width(contentW).
-			Render(renderMarkdown(m.streamThinking.String(), contentW-4))
-		vis += "\n" + thinkingBox
+		if vis.Len() > 0 {
+			vis.WriteString("\n")
+		}
+		thinkingText := renderMarkdown(m.streamThinking.String(), contentW)
+		vis.WriteString(thinkingStyle.Render(thinkingText))
 	}
 
+	// streamContent: current content as flowing text
 	if m.streamContent.Len() > 0 {
-		contentBox := lipgloss.NewStyle().
-			Border(lipgloss.RoundedBorder()).
-			BorderForeground(lipgloss.Color("63")).
-			Padding(1, 2).
-			Width(contentW).
-			Render(renderMarkdown(m.streamContent.String(), contentW-4))
-		vis += "\n" + contentBox
+		if vis.Len() > 0 {
+			vis.WriteString("\n")
+		}
+		vis.WriteString(renderMarkdown(m.streamContent.String(), contentW))
 	}
 
-	if m.phase == phaseStreaming && m.streamThinking.Len() == 0 && m.streamContent.Len() == 0 && m.outputLog.Len() == 0 {
-		vis += "\n" + lipgloss.NewStyle().PaddingLeft(1).Render(m.spinner.View()+" AI 正在分析代码变更...")
+	// Initial spinner when nothing yet
+	if m.phase == phaseStreaming && vis.Len() == 0 {
+		vis.WriteString("\n" + lipgloss.NewStyle().PaddingLeft(1).Render(m.spinner.View()+" AI 正在分析代码变更..."))
 	}
 
+	// Confirmation prompts
 	if m.phase == phaseStreaming && m.awaitingConfirm {
-		vis += "\n" + lipgloss.NewStyle().PaddingLeft(1).Bold(true).Foreground(lipgloss.Color("220")).Render("➜ 等待确认: 按 Y/Enter 确认提交 / N 取消 / Esc 退出")
-	}
-
-	if m.phase == phaseDone {
-		if m.commitMessage != "" {
-			vis += "\n" + successLineStyle.Render("✓ 提交成功")
-			if m.commitHash != "" {
-				vis += "\n" + toolCallLineStyle.Render(fmt.Sprintf("提交哈希: %s", m.commitHash))
-			}
-			msgBox := lipgloss.NewStyle().
-				Border(lipgloss.RoundedBorder()).
-				BorderForeground(lipgloss.Color("2")).
-				Padding(1, 2).
-				Width(contentW).
-				Render(m.commitMessage)
-			vis += "\n" + msgBox
+		if m.awaitingSummarizeConfirm {
+			vis.WriteString("\n\n" + lipgloss.NewStyle().PaddingLeft(1).Bold(true).Foreground(lipgloss.Color("220")).Render("➜ 等待确认: 代码已理解，按 Y/Enter 进入审查和提交阶段 / N 取消 / Esc 退出"))
 		} else {
-			vis += "\n" + errorLineStyle.Render("✗ 提交未完成")
+			vis.WriteString("\n\n" + lipgloss.NewStyle().PaddingLeft(1).Bold(true).Foreground(lipgloss.Color("220")).Render("➜ 等待确认: 按 Y/Enter 确认提交 / N 取消 / Esc 退出"))
 		}
 	}
 
-	m.contentViewport.SetContent(vis)
-}
+	// Done state
+	if m.phase == phaseDone {
+		if m.commitMessage != "" {
+			vis.WriteString("\n\n" + successLineStyle.Render("✓ 提交成功"))
+			if m.verifiedHash != "" {
+				vis.WriteString("\n" + toolCallLineStyle.Render(fmt.Sprintf("提交哈希: %s", m.verifiedHash)))
+			} else if m.commitHash != "" {
+				vis.WriteString("\n" + toolCallLineStyle.Render(fmt.Sprintf("AI 报告哈希: %s", m.commitHash)))
+			}
+			if m.commitVerified {
+				if m.isPartialCommit {
+					vis.WriteString("\n" + lipgloss.NewStyle().PaddingLeft(1).Foreground(lipgloss.Color("220")).Render("⚠ 部分提交: 仍有文件未提交"))
+					for _, f := range m.remainingFiles {
+						vis.WriteString("\n" + toolCallLineStyle.Render(fmt.Sprintf("  \u2022 %s", f)))
+					}
+				} else {
+					vis.WriteString("\n" + toolCallLineStyle.Render("状态: 工作区干净"))
+				}
+			}
+			// Commit message as flowing markdown, no border
+			vis.WriteString("\n\n")
+			vis.WriteString(renderMarkdown(m.commitMessage, contentW))
+		} else {
+			vis.WriteString("\n" + errorLineStyle.Render("✗ 提交未完成"))
+		}
+	}
 
+	m.contentViewport.SetContent(vis.String())
+}
 func (m *CommitFlowModel) closeStreamDone() {
 	m.streamDoneOnce.Do(func() { close(m.streamDoneCh) })
 }
@@ -450,23 +536,39 @@ func (m *CommitFlowModel) appendErrorLine(line string) {
 }
 
 func (m *CommitFlowModel) appendToolCallLines(calls []ai.PendingToolCall) {
+	m.toolRunNames = nil
 	for _, tc := range calls {
+		label := tc.Name
 		switch tc.Name {
 		case "read_file":
-			path := tc.ArgString("path")
-			m.appendLine(toolCallLineStyle.Render(fmt.Sprintf("📄 [read_file] %s → 读取中...", path)))
-		case "list_tree":
-			m.appendLine(toolCallLineStyle.Render("📁 [list_tree] → 获取项目树..."))
-		case "git_log_recent":
-			m.appendLine(toolCallLineStyle.Render("📋 [git_log_recent] → 获取历史记录..."))
-		case "git_hook_check":
-			m.appendLine(toolCallLineStyle.Render("🔧 [git_hook_check] → 检查 hook..."))
+			label = tc.Name + " " + tc.ArgString("path")
 		case "git_config_get":
-			key := tc.ArgString("key")
-			m.appendLine(toolCallLineStyle.Render(fmt.Sprintf("⚙️  [git_config_get] %s → 查询中...", key)))
-		default:
-			m.appendLine(toolCallLineStyle.Render(fmt.Sprintf("🔧 [%s] → 执行中...", tc.Name)))
+			label = tc.Name + " " + tc.ArgString("key")
+		case "search_references":
+			label = tc.Name + " '" + tc.ArgString("symbol") + "'"
 		}
+		m.toolRunNames = append(m.toolRunNames, label)
+	}
+}
+
+func (m *CommitFlowModel) markToolsCompleted() {
+	if len(m.toolRunNames) == 0 {
+		return
+	}
+	for _, name := range m.toolRunNames {
+		m.appendLine(toolCallLineStyle.Render(fmt.Sprintf("✓ │ %s", name)))
+	}
+	m.toolRunNames = nil
+}
+
+func (m *CommitFlowModel) flushStreamToOutput() {
+	if m.streamThinking.Len() > 0 {
+		m.reviewOutput.WriteString(m.streamThinking.String() + "\n")
+		m.streamThinking.Reset()
+	}
+	if m.streamContent.Len() > 0 {
+		m.reviewOutput.WriteString(m.streamContent.String() + "\n")
+		m.streamContent.Reset()
 	}
 }
 
@@ -518,12 +620,22 @@ func getStagedFiles() []string {
 func (m *CommitFlowModel) startGenerateCmd() tea.Cmd {
 	conventionInfo := git.DetectConventions()
 	debug.Logf("startGenerateCmd begin stagedDiffMode=%s stagedDiffBytes=%d", m.stagedDiffMode, len(m.stagedDiffContent))
-	// 使用 stage 后的实际 diff，确保 AI 分析的内容与提交完全一致
-	sess, err := m.opts.Client.StartCommitSession(
-		m.stagedDiffContent, m.opts.Desc, conventionInfo, 3, m.selectedFiles,
-	)
+
+	var sess *ai.CommitSession
+	var err error
+	if m.continueSess != nil {
+		debug.Logf("startGenerateCmd using ContinueCommitSession")
+		sess, err = m.opts.Client.ContinueCommitSession(
+			m.continueSess, m.stagedDiffContent, conventionInfo, m.selectedFiles,
+		)
+	} else {
+		// 使用 stage 后的实际 diff，确保 AI 分析的内容与提交完全一致
+		sess, err = m.opts.Client.StartCommitSession(
+			m.stagedDiffContent, m.opts.DescFunc(), conventionInfo, 3, m.selectedFiles,
+		)
+	}
 	if err != nil {
-		debug.Logf("startGenerateCmd StartCommitSession failed err=%v", err)
+		debug.Logf("startGenerateCmd create session failed err=%v", err)
 		return func() tea.Msg { return aiRoundMsg{err: err} }
 	}
 	debug.Logf("startGenerateCmd session started")
@@ -573,11 +685,13 @@ func (m *CommitFlowModel) execPendingCmd() tea.Cmd {
 	m.streamContent.Reset()
 	m.streamDone = false
 
-	label := "正在执行工具..."
 	if m.hasCommitCall() {
-		label = "正在执行提交..."
+		m.appendLine(toolCallLineStyle.Render(fmt.Sprintf("⡿ │ %s", "git_commit")))
+	} else {
+		for _, name := range m.toolRunNames {
+			m.appendLine(toolCallLineStyle.Render(fmt.Sprintf("⡿ │ %s", name)))
+		}
 	}
-	m.appendLine(m.spinner.View() + " " + label)
 	m.refreshViewport()
 
 	m.streamChan = make(chan tea.Msg, 64)
@@ -629,6 +743,15 @@ func (m *CommitFlowModel) execPendingCmd() tea.Cmd {
 func (m *CommitFlowModel) hasCommitCall() bool {
 	for _, tc := range m.pendingCalls {
 		if tc.Name == "git_commit" || tc.Name == "git_commit_amend" {
+			return true
+		}
+	}
+	return false
+}
+
+func (m *CommitFlowModel) hasSummarizeCall() bool {
+	for _, tc := range m.pendingCalls {
+		if tc.Name == "summarize_changes" {
 			return true
 		}
 	}
@@ -704,14 +827,23 @@ func (m *CommitFlowModel) GetResult() CommitFlowResult {
 		}
 	}
 	result := m.session.GetResult()
+
+	// 优先使用验证后的 hash（比 AI 报告的更可靠）
+	hash := m.verifiedHash
+	if hash == "" {
+		hash = m.commitHash
+	}
+
 	return CommitFlowResult{
 		Success:          m.commitMessage != "",
 		CommitMessage:    m.commitMessage,
-		CommitHash:       m.commitHash,
+		CommitHash:       hash,
 		SelectedFiles:    m.selectedFiles,
 		PromptTokens:     result.PromptTokens,
 		CompletionTokens: result.CompletionTokens,
 		TotalTokens:      result.TotalTokens,
+		IsPartial:        m.isPartialCommit,
+		RemainingFiles:   m.remainingFiles,
 	}
 }
 
@@ -723,14 +855,17 @@ type CommitFlowResult struct {
 	PromptTokens     int
 	CompletionTokens int
 	TotalTokens      int
+	IsPartial        bool
+	RemainingFiles   []string
 }
+
+var hashRe = regexp.MustCompile(`SUCCESS[^\n]*?([0-9a-f]{7,40})`)
 
 func extractHash(results []ai.ToolCallResult) string {
 	for _, tr := range results {
-		if (tr.ToolName == "git_commit" || tr.ToolName == "git_commit_amend") && strings.Contains(tr.Result, "SUCCESS") {
-			parts := strings.Fields(tr.Result)
-			if len(parts) >= 4 {
-				return parts[3]
+		if tr.ToolName == "git_commit" || tr.ToolName == "git_commit_amend" {
+			if matches := hashRe.FindStringSubmatch(tr.Result); len(matches) >= 2 {
+				return matches[1]
 			}
 		}
 	}
@@ -746,6 +881,7 @@ func RunCommitFlow(files []diff.FileChange, opts CommitFlowOptions) (CommitFlowR
 
 	p := tea.NewProgram(m,
 		tea.WithAltScreen(),
+		tea.WithMouseCellMotion(),
 	)
 
 	model, err := p.Run()

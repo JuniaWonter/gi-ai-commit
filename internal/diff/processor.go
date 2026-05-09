@@ -134,7 +134,7 @@ func (p *DiffProcessor) buildPayloadsFromDiff(fullDiff string, files []string) (
 	stat, nameStatus := p.getDiffStatAndNameStatus(files)
 	payloads = append(payloads, DiffPayload{
 		Mode: "文件级摘要",
-		Content: fmt.Sprintf(`以下代码变更过大，未附带完整 patch。请仅根据变更统计和文件列表生成一条概括性的 commit message。
+		Content: fmt.Sprintf(`以下代码变更过大，仅包含文件列表。请先用 diff_overview 了解概览，再用 read_diff(<文件路径>) 读取关键文件的变更，用 read_file 读取代码上下文。
 
 ## 变更统计
 %s

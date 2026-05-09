@@ -19,6 +19,7 @@ type CommitOptions struct {
 	AutoConfirm bool
 	DryRun      bool
 	Model       string
+	Continue    bool
 }
 
 func RunCommit(opts CommitOptions) error {
@@ -34,7 +35,8 @@ func RunCommit(opts CommitOptions) error {
 		return fmt.Errorf("获取变更文件失败：%w", err)
 	}
 	if len(files) == 0 {
-		return fmt.Errorf("没有变更的文件")
+		fmt.Println("没有变更的文件，跳过提交")
+		return nil
 	}
 	debug.Logf("cmd.RunCommit changed files=%d", len(files))
 
@@ -59,13 +61,25 @@ func RunCommit(opts CommitOptions) error {
 		return fmt.Errorf("获取模型配置失败：%w", err)
 	}
 	client, err := ai.NewClient(ai.Config{
-		APIKey:  modelCfg.APIKey,
-		Model:   modelCfg.Model,
-		BaseURL: modelCfg.BaseURL,
-		Timeout: modelCfg.GetTimeout(),
+		APIKey:        modelCfg.APIKey,
+		Model:         modelCfg.Model,
+		BaseURL:       modelCfg.BaseURL,
+		Timeout:       modelCfg.GetTimeout(),
+		ContextWindow: modelCfg.ContextWindow,
 	})
 	if err != nil {
 		return fmt.Errorf("初始化 AI 客户端失败：%w", err)
+	}
+
+	// --continue 模式：加载上次会话
+	var continueSession *ai.PersistableSession
+	if opts.Continue {
+		fmt.Println("📂 加载上次会话...")
+		loaded, err := ai.LoadSession(modelCfg.Model)
+		if err != nil {
+			return fmt.Errorf("加载 continue 会话失败：%w", err)
+		}
+		continueSession = loaded
 	}
 
 	fmt.Println("📋 检查仓库描述...")
@@ -81,14 +95,18 @@ func RunCommit(opts CommitOptions) error {
 		MaxCompactDiffFiles: cfg.DiffPrompt.MaxCompactDiffFiles,
 	}
 
+	// --continue 模式：继承会话内容，不走自动确认
+	autoConfirm := opts.AutoConfirm
+
 	fmt.Println("🚀 进入交互界面...")
 	result, err := tui.RunCommitFlow(files, tui.CommitFlowOptions{
-		AutoConfirm: opts.AutoConfirm,
-		DryRun:      opts.DryRun,
-		DescFunc:    descFunc,
-		DiffCfg:     diffCfg,
-		GitRoot:     gitRoot,
-		Client:      client,
+		AutoConfirm:     autoConfirm,
+		DryRun:          opts.DryRun,
+		DescFunc:        descFunc,
+		DiffCfg:         diffCfg,
+		GitRoot:         gitRoot,
+		Client:          client,
+		ContinueSession: continueSession,
 	})
 	if err != nil {
 		return fmt.Errorf("TUI 运行失败：%w", err)
@@ -111,6 +129,14 @@ func RunCommit(opts CommitOptions) error {
 	if result.CommitMessage != "" {
 		fmt.Println("   Message:")
 		fmt.Printf("   %s\n", strings.ReplaceAll(result.CommitMessage, "\n", "\n   "))
+	}
+	if result.IsPartial && len(result.RemainingFiles) > 0 {
+		fmt.Printf("⚠️  部分提交: 以下 %d 个文件未提交:\n", len(result.RemainingFiles))
+		for _, f := range result.RemainingFiles {
+			fmt.Printf("     � %s\n", f)
+		}
+	} else if result.CommitHash != "" {
+		fmt.Println("   ✓ 工作区干净，所有变更已提交")
 	}
 	if result.TotalTokens > 0 {
 		fmt.Printf("   Token 消耗: prompt=%d  completion=%d  total=%d\n", result.PromptTokens, result.CompletionTokens, result.TotalTokens)
