@@ -463,6 +463,13 @@ func (m *CommitFlowModel) refreshViewport() {
 		vis.WriteString(renderMarkdown(m.reviewOutput.String(), contentW))
 	}
 
+	// toolRunNames: running tools (shown with spinner, inline in the flow)
+	if len(m.toolRunNames) > 0 {
+		for _, name := range m.toolRunNames {
+			vis.WriteString("\n" + toolCallLineStyle.Render(fmt.Sprintf("⡿ │ %s", name)))
+		}
+	}
+
 	// streamThinking: current thinking as dim/italic text
 	if m.streamThinking.Len() > 0 {
 		if vis.Len() > 0 {
@@ -556,7 +563,7 @@ func (m *CommitFlowModel) markToolsCompleted() {
 		return
 	}
 	for _, name := range m.toolRunNames {
-		m.appendLine(toolCallLineStyle.Render(fmt.Sprintf("✓ │ %s", name)))
+		m.reviewOutput.WriteString("✓ │ " + name + "\n")
 	}
 	m.toolRunNames = nil
 }
@@ -685,11 +692,10 @@ func (m *CommitFlowModel) execPendingCmd() tea.Cmd {
 	m.streamContent.Reset()
 	m.streamDone = false
 
-	if m.hasCommitCall() {
-		m.appendLine(toolCallLineStyle.Render(fmt.Sprintf("⡿ │ %s", "git_commit")))
-	} else {
-		for _, name := range m.toolRunNames {
-			m.appendLine(toolCallLineStyle.Render(fmt.Sprintf("⡿ │ %s", name)))
+	// Ensure toolRunNames is populated from pendingCalls (needed for commit/summarize confirm path)
+	if len(m.toolRunNames) == 0 && len(m.pendingCalls) > 0 {
+		for _, tc := range m.pendingCalls {
+			m.toolRunNames = append(m.toolRunNames, tc.Name)
 		}
 	}
 	m.refreshViewport()
