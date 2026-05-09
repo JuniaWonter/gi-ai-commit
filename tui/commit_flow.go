@@ -536,6 +536,11 @@ func (m *CommitFlowModel) closeStreamDone() {
 
 func (m *CommitFlowModel) appendLine(line string) {
 	m.outputLog.WriteString(line + "\n")
+	if m.outputLog.Len() > 10000 {
+		s := m.outputLog.String()
+		m.outputLog.Reset()
+		m.outputLog.WriteString(s[len(s)-7500:])
+	}
 }
 
 func (m *CommitFlowModel) appendErrorLine(line string) {
@@ -566,6 +571,26 @@ func (m *CommitFlowModel) markToolsCompleted() {
 		m.reviewOutput.WriteString("✓ │ " + name + "\n")
 	}
 	m.toolRunNames = nil
+	m.trimReviewOutput()
+}
+
+const maxReviewBytes = 80000
+
+func (m *CommitFlowModel) trimReviewOutput() {
+	if m.reviewOutput.Len() > maxReviewBytes {
+		s := m.reviewOutput.String()
+		trimAt := len(s) - maxReviewBytes*3/4
+		if trimAt < 0 {
+			trimAt = 0
+		}
+		// Find next newline to avoid cutting mid-line
+		if idx := strings.Index(s[trimAt:], "\n"); idx >= 0 {
+			trimAt += idx + 1
+		}
+		m.reviewOutput.Reset()
+		m.reviewOutput.WriteString("... (早期内容已截断) \n")
+		m.reviewOutput.WriteString(s[trimAt:])
+	}
 }
 
 func (m *CommitFlowModel) flushStreamToOutput() {
@@ -577,6 +602,7 @@ func (m *CommitFlowModel) flushStreamToOutput() {
 		m.reviewOutput.WriteString(m.streamContent.String() + "\n")
 		m.streamContent.Reset()
 	}
+	m.trimReviewOutput()
 }
 
 func (m *CommitFlowModel) startStageCmd(files []string) tea.Cmd {
