@@ -87,19 +87,27 @@ func renderMarkdown(text string, maxWidth int) string {
 		// Unordered list
 		if strings.HasPrefix(line, "- ") || strings.HasPrefix(line, "* ") {
 			content := processInlineMarkdown(line[2:])
-			out.WriteString(lipgloss.NewStyle().PaddingLeft(2).Render("• "+content) + "\n")
+			lm := maxWidth - 4
+			if lm < 10 {
+				lm = 10
+			}
+			out.WriteString(lipgloss.NewStyle().PaddingLeft(2).Width(lm).Render("• "+content) + "\n")
 			continue
 		}
 
 		// Numbered list
 		if m := mdNumberedRE.FindStringSubmatch(line); m != nil {
 			content := processInlineMarkdown(m[2])
-			out.WriteString(lipgloss.NewStyle().PaddingLeft(2).Render(m[1]+". "+content) + "\n")
+			lm := maxWidth - 4
+			if lm < 10 {
+				lm = 10
+			}
+			out.WriteString(lipgloss.NewStyle().PaddingLeft(2).Width(lm).Render(m[1]+". "+content) + "\n")
 			continue
 		}
 
-		// Regular line
-		out.WriteString(processInlineMarkdown(line) + "\n")
+		// Regular line — must constrain width for text wrapping
+		out.WriteString(lipgloss.NewStyle().Width(maxWidth).Render(processInlineMarkdown(line)) + "\n")
 	}
 
 	result := out.String()

@@ -183,7 +183,7 @@ func (p *StreamingPanel) View(width, height int) string {
 
 	// Output log (tool calls, status)
 	if p.outputLog.Len() > 0 {
-		vis.WriteString(p.outputLog.String())
+		vis.WriteString(lipgloss.NewStyle().Width(contentW).Render(p.outputLog.String()))
 	}
 
 	// Review output (flushed AI content, markdown rendered)

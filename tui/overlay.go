@@ -61,6 +61,11 @@ func (o *Overlay) View(width, height int) string {
 		width = 80
 	}
 
+	// Compact bottom-bar mode — does NOT cover the UI content
+	if height <= 5 {
+		return o.compactBar(width)
+	}
+
 	dialogW := 60
 	if width < dialogW+4 {
 		dialogW = width - 4
@@ -89,4 +94,15 @@ func (o *Overlay) View(width, height int) string {
 		lipgloss.Center, lipgloss.Center,
 		dialog,
 	)
+}
+
+func (o *Overlay) compactBar(width int) string {
+	content := "? " + o.Message + "    " + o.Help
+	return lipgloss.NewStyle().
+		Background(Th.Warning).
+		Foreground(Th.Inverted).
+		Bold(true).
+		Width(width).
+		Padding(0, 1).
+		Render(content)
 }
