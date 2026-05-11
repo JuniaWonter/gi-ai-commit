@@ -550,43 +550,6 @@ func parseHunkLineNumbers(hunkLine string) (int, int) {
 	return oldStart, newStart
 }
 
-func (f *FileSelector) computeLineNumbers(raw string) (oldNums []int, newNums []int) {
-	dlines := parseDiffLines(raw)
-	oldLine := 0
-	newLine := 0
-
-	for _, dl := range dlines {
-		if dl.typ == "hunk" {
-			oldLine, newLine = parseHunkLineNumbers(dl.content)
-			oldNums = append(oldNums, -1)
-			newNums = append(newNums, -1)
-			continue
-		}
-		switch dl.typ {
-		case "header", "oldFile", "newFile":
-			oldNums = append(oldNums, -1)
-			newNums = append(newNums, -1)
-		case "added":
-			oldNums = append(oldNums, -1)
-			newNums = append(newNums, newLine)
-			newLine++
-		case "removed":
-			oldNums = append(oldNums, oldLine)
-			newNums = append(newNums, -1)
-			oldLine++
-		case "context":
-			oldNums = append(oldNums, oldLine)
-			newNums = append(newNums, newLine)
-			oldLine++
-			newLine++
-		default:
-			oldNums = append(oldNums, -1)
-			newNums = append(newNums, -1)
-		}
-	}
-	return oldNums, newNums
-}
-
 func formatLineNum(num int, width int) string {
 	if num < 0 {
 		return strings.Repeat(" ", width)
@@ -784,9 +747,7 @@ func (f *FileSelector) computeStatSummary(raw string) string {
 			parts := strings.SplitN(dl.content, " ", 4)
 			if len(parts) >= 4 {
 				name := parts[3]
-				if strings.HasPrefix(name, "b/") {
-					name = name[2:]
-				}
+				name = strings.TrimPrefix(name, "b/")
 				currentFile = name
 				fileNames = append(fileNames, name)
 			}

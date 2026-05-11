@@ -13,11 +13,23 @@ var (
 	mdItalicRE   = regexp.MustCompile(`\*(.+?)\*`)
 	mdCodeRE     = regexp.MustCompile("`([^`]+)`")
 	mdNumberedRE = regexp.MustCompile(`^(\d+)\.\s+(.+)$`)
+	mdLinkRE     = regexp.MustCompile(`\[([^\]]+)\]\(([^)]+)\)`)
 )
+
+// simpleMarkdownCache caches rendered markdown output to avoid re-rendering
+// on every frame when content hasn't changed.
+var simpleMarkdownCache struct {
+	input  string
+	maxW   int
+	output string
+}
 
 func renderMarkdown(text string, maxWidth int) string {
 	if maxWidth <= 0 {
 		maxWidth = 80
+	}
+	if simpleMarkdownCache.input == text && simpleMarkdownCache.maxW == maxWidth {
+		return simpleMarkdownCache.output
 	}
 
 	lines := strings.Split(text, "\n")
@@ -28,13 +40,11 @@ func renderMarkdown(text string, maxWidth int) string {
 	for _, rawLine := range lines {
 		line := strings.TrimRight(rawLine, " \t")
 
-		// Handle code blocks
 		if strings.HasPrefix(line, "```") {
 			if inCodeBlock {
-				// End code block
 				codeStyle := lipgloss.NewStyle().
-					Foreground(lipgloss.Color("241")).
-					Background(lipgloss.Color("236")).
+					Foreground(Th.DimText).
+					Background(Th.SurfaceAlt).
 					Padding(1, 2).
 					Width(maxWidth).
 					Render(codeBlock.String())
@@ -42,7 +52,6 @@ func renderMarkdown(text string, maxWidth int) string {
 				codeBlock.Reset()
 				inCodeBlock = false
 			} else {
-				// Start code block
 				inCodeBlock = true
 			}
 			continue
@@ -61,60 +70,76 @@ func renderMarkdown(text string, maxWidth int) string {
 		// Headings
 		if m := mdHeadingRE.FindStringSubmatch(line); m != nil {
 			level := len(m[1])
-			content := processInline(m[2])
+			content := processInlineMarkdown(m[2])
 			var style lipgloss.Style
 			switch level {
 			case 1:
-				style = lipgloss.NewStyle().Bold(true).Foreground(lipgloss.Color("63")).PaddingTop(1)
+				style = lipgloss.NewStyle().Bold(true).Foreground(Th.Primary).PaddingTop(1)
 			case 2:
-				style = lipgloss.NewStyle().Bold(true).Foreground(lipgloss.Color("104"))
+				style = lipgloss.NewStyle().Bold(true).Foreground(Th.Secondary)
 			case 3:
-				style = lipgloss.NewStyle().Bold(true).Foreground(lipgloss.Color("141"))
+				style = lipgloss.NewStyle().Bold(true).Foreground(Th.Accent)
 			}
 			out.WriteString(style.Width(maxWidth).Render(content) + "\n")
 			continue
 		}
 
-		// Unordered list items
+		// Unordered list
 		if strings.HasPrefix(line, "- ") || strings.HasPrefix(line, "* ") {
-			content := processInline(line[2:])
+			content := processInlineMarkdown(line[2:])
 			out.WriteString(lipgloss.NewStyle().PaddingLeft(2).Render("• "+content) + "\n")
 			continue
 		}
 
-		// Numbered list items
+		// Numbered list
 		if m := mdNumberedRE.FindStringSubmatch(line); m != nil {
-			content := processInline(m[2])
+			content := processInlineMarkdown(m[2])
 			out.WriteString(lipgloss.NewStyle().PaddingLeft(2).Render(m[1]+". "+content) + "\n")
 			continue
 		}
 
-		// Regular line with inline formatting
-		out.WriteString(processInline(line) + "\n")
+		// Regular line
+		out.WriteString(processInlineMarkdown(line) + "\n")
 	}
 
-	return out.String()
+	result := out.String()
+	simpleMarkdownCache.input = text
+	simpleMarkdownCache.maxW = maxWidth
+	simpleMarkdownCache.output = result
+	return result
 }
 
-func processInline(text string) string {
-	// Replace bold
+func processInlineMarkdown(text string) string {
+	// Links: [text](url) → text (underline)
+	text = mdLinkRE.ReplaceAllStringFunc(text, func(match string) string {
+		parts := mdLinkRE.FindStringSubmatch(match)
+		if len(parts) >= 3 {
+			return lipgloss.NewStyle().
+				Foreground(Th.Info).
+				Underline(true).
+				Render(parts[1])
+		}
+		return match
+	})
+
+	// Bold
 	text = mdBoldRE.ReplaceAllStringFunc(text, func(match string) string {
 		inner := match[2 : len(match)-2]
 		return lipgloss.NewStyle().Bold(true).Render(inner)
 	})
 
-	// Replace italic
+	// Italic
 	text = mdItalicRE.ReplaceAllStringFunc(text, func(match string) string {
 		inner := match[1 : len(match)-1]
-		return lipgloss.NewStyle().Italic(true).Foreground(lipgloss.Color("141")).Render(inner)
+		return lipgloss.NewStyle().Italic(true).Foreground(Th.Accent).Render(inner)
 	})
 
-	// Replace inline code
+	// Inline code
 	text = mdCodeRE.ReplaceAllStringFunc(text, func(match string) string {
 		inner := match[1 : len(match)-1]
 		return lipgloss.NewStyle().
-			Foreground(lipgloss.Color("220")).
-			Background(lipgloss.Color("236")).
+			Foreground(Th.Warning).
+			Background(Th.SurfaceAlt).
 			Padding(0, 1).
 			Render(inner)
 	})
