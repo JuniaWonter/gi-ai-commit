@@ -523,25 +523,26 @@ func (m *CommitFlowModel) View() string {
 		h = 24
 	}
 
-	// Overlay takes full screen
-	if m.overlay != nil {
-		return m.overlay.View(w, h)
-	}
-
 	// Panel
 	panelView := ""
 	if m.panel != nil {
 		panelView = m.panel.View(w, h-2)
 	}
 
-	// Footer
+	// Footer — overlay replaces footer with a compact confirmation bar
+	// instead of covering the entire screen, so user can see AI output.
 	m.footer = NewFooterBar(m.footerEntries())
 	m.footer.RightMsg = m.footerRightMsg()
+
+	footerView := m.footer.View(w)
+	if m.overlay != nil {
+		footerView = m.overlay.View(w, 3)
+	}
 
 	return lipgloss.JoinVertical(lipgloss.Left,
 		m.header.View(w),
 		panelView,
-		m.footer.View(w),
+		footerView,
 	)
 }
 
