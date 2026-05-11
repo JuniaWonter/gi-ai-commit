@@ -8,21 +8,12 @@ import (
 	"github.com/charmbracelet/lipgloss"
 )
 
-var (
-	editorTitleStyle = lipgloss.NewStyle().
-		Bold(true).
-		Foreground(lipgloss.Color("63"))
-
-	editorHelpStyle = lipgloss.NewStyle().
-		Foreground(lipgloss.Color("241"))
-)
-
 type editorModel struct {
-	textarea textarea.Model
-	err      error
-	done     bool
+	textarea  textarea.Model
+	err       error
+	done      bool
 	cancelled bool
-	result   string
+	result    string
 }
 
 func newEditorModel(initialValue string) editorModel {
@@ -33,6 +24,13 @@ func newEditorModel(initialValue string) editorModel {
 	ta.CharLimit = 500
 	ta.SetWidth(80)
 	ta.SetHeight(10)
+
+	ta.FocusedStyle.CursorLine = lipgloss.NewStyle().
+		Background(Th.SurfaceAlt)
+	ta.FocusedStyle.Placeholder = lipgloss.NewStyle().
+		Foreground(Th.DimText)
+	ta.FocusedStyle.Text = lipgloss.NewStyle().
+		Foreground(Th.Text)
 
 	return editorModel{
 		textarea: ta,
@@ -72,10 +70,16 @@ func (m editorModel) View() string {
 		return ""
 	}
 
-	title := editorTitleStyle.Render("编辑 commit message")
-	help := editorHelpStyle.Render("Ctrl+S 保存 │ Esc/Ctrl+C 取消 │ 支持多行输入，可删除/编辑")
+	title := PrimaryStyle().Render("编辑 commit message")
+	help := lipgloss.NewStyle().
+		Foreground(Th.DimText).
+		Render("Ctrl+S 保存 │ Esc/Ctrl+C 取消 │ 支持多行输入")
 
-	return title + "\n\n" + m.textarea.View() + "\n\n" + help
+	return lipgloss.JoinVertical(lipgloss.Left,
+		"\n"+title+"\n",
+		m.textarea.View(),
+		"\n"+help,
+	)
 }
 
 func EditCommitMessage(initialValue string) (string, error) {
