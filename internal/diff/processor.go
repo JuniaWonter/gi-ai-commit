@@ -3,6 +3,7 @@ package diff
 import (
 	"fmt"
 	"os/exec"
+	"path/filepath"
 	"sort"
 	"strings"
 
@@ -103,10 +104,18 @@ func (p *DiffProcessor) buildPayloadsFromDiff(fullDiff string, files []string) (
 
 	var payloads []DiffPayload
 
+	// 获取文件分组索引（大变更集时注入）
+	_, nameStatus := p.getDiffStatAndNameStatus(files)
+	dirIndex := p.buildDirIndex(nameStatus)
+
 	if len(fullDiff) <= p.cfg.MaxFullDiffBytes {
+		content := fullDiff
+		if dirIndex != "" {
+			content = dirIndex + "\n\n" + content
+		}
 		payloads = append(payloads, DiffPayload{
 			Mode:    "完整 diff",
-			Content: fullDiff,
+			Content: content,
 		})
 		return payloads, nil
 	}
@@ -114,9 +123,7 @@ func (p *DiffProcessor) buildPayloadsFromDiff(fullDiff string, files []string) (
 	compact := p.buildCompactDiffInternal(fullDiff, files)
 	if compact != "" {
 		stat, nameStatus := p.getDiffStatAndNameStatus(files)
-		payloads = append(payloads, DiffPayload{
-			Mode: "压缩摘要",
-			Content: fmt.Sprintf(`以下代码变更过大，已自动压缩。请优先依据变更统计、文件列表和关键 patch 生成一条准确的 commit message。
+		contentCompact := fmt.Sprintf(`以下代码变更过大，已自动压缩。请优先依据变更统计、文件列表和关键 patch 生成一条准确的 commit message。
 
 ## 变更统计
 %s
@@ -126,25 +133,90 @@ func (p *DiffProcessor) buildPayloadsFromDiff(fullDiff string, files []string) (
 
 ## 关键 Patch（已截断）
 %s
-`, strings.TrimSpace(stat), strings.TrimSpace(nameStatus), compact),
+`, strings.TrimSpace(stat), strings.TrimSpace(nameStatus), compact)
+		if dirIndex != "" {
+			contentCompact = dirIndex + "\n\n" + contentCompact
+		}
+		payloads = append(payloads, DiffPayload{
+			Mode: "压缩摘要",
+			Content: contentCompact,
 		})
 		return payloads, nil
 	}
 
 	stat, nameStatus := p.getDiffStatAndNameStatus(files)
-	payloads = append(payloads, DiffPayload{
-		Mode: "文件级摘要",
-		Content: fmt.Sprintf(`以下代码变更过大，仅包含文件列表。请先用 diff_overview 了解概览，再用 read_diff(<文件路径>) 读取关键文件的变更，用 read_file 读取代码上下文。
+	contentFile := fmt.Sprintf(`以下代码变更过大，仅包含文件列表。请先用 diff_overview 了解概览，再用 read_diff(<文件路径>) 读取关键文件的变更，用 read_file 读取代码上下文。
 
 ## 变更统计
 %s
 
 ## 文件列表
 %s
-`, strings.TrimSpace(stat), strings.TrimSpace(nameStatus)),
+`, strings.TrimSpace(stat), strings.TrimSpace(nameStatus))
+	if dirIndex != "" {
+		contentFile = dirIndex + "\n\n" + contentFile
+	}
+	payloads = append(payloads, DiffPayload{
+		Mode: "文件级摘要",
+		Content: contentFile,
 	})
 
 	return payloads, nil
+}
+
+// buildDirIndex 按目录分组变更文件，生成可读的分组索引。
+// 帮助 AI 快速理解文件间的模块归属关系。
+func (p *DiffProcessor) buildDirIndex(nameStatus string) string {
+	if nameStatus == "" {
+		return ""
+	}
+	lines := strings.Split(strings.TrimSpace(nameStatus), "\n")
+	if len(lines) <= 3 {
+		return ""
+	}
+
+	type dirEntry struct {
+		files []string
+		total int
+	}
+	dirs := make(map[string]*dirEntry)
+	dirOrder := make([]string, 0)
+
+	for _, line := range lines {
+		parts := strings.Fields(line)
+		if len(parts) < 2 {
+			continue
+		}
+		path := parts[len(parts)-1]
+		dir := filepath.Dir(path)
+		if dir == "." {
+			dir = "/"
+		}
+		if _, ok := dirs[dir]; !ok {
+			dirs[dir] = &dirEntry{}
+			dirOrder = append(dirOrder, dir)
+		}
+		dirs[dir].files = append(dirs[dir].files, path)
+		dirs[dir].total++
+	}
+
+	var b strings.Builder
+	b.WriteString("\n## 变更文件分组（按目录）\n")
+	for _, dir := range dirOrder {
+		e := dirs[dir]
+		// 列出文件名，过多时只列前5个
+		fileList := e.files
+		if len(fileList) > 5 {
+			fileList = fileList[:5]
+		}
+		b.WriteString(fmt.Sprintf("- %s/ (%d files): %s",
+			dir, e.total, strings.Join(fileList, ", ")))
+		if len(e.files) > 5 {
+			b.WriteString(fmt.Sprintf(" ... 其他 %d 个", len(e.files)-5))
+		}
+		b.WriteString("\n")
+	}
+	return b.String()
 }
 
 func (p *DiffProcessor) getDiffStatAndNameStatus(files []string) (string, string) {

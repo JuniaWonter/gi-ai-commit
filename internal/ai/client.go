@@ -220,7 +220,7 @@ func (c *Client) StartCommitSession(diffContent, description string, conventionI
 		tools:              buildOpenAITools(),
 		maxRetries:         maxRetries,
 		maxLoops:           100,
-		maxReadFileCalls:   envIntOrDefault("GIT_AI_MAX_READ_FILE_CALLS", 4),
+		maxReadFileCalls:   dynReadFileLimit(len(selectedFiles)),
 		maxListTreeCalls:   envIntOrDefault("GIT_AI_MAX_LIST_TREE_CALLS", 1),
 		compactMode:        compactMode,
 		toolCache:           make(map[string]string),
@@ -261,7 +261,7 @@ func (c *Client) ContinueCommitSession(ps *PersistableSession, diffContent strin
 		tools:            buildOpenAITools(),
 		maxRetries:       3,
 		maxLoops:         100,
-		maxReadFileCalls: envIntOrDefault("GIT_AI_MAX_READ_FILE_CALLS", 4),
+		maxReadFileCalls: dynReadFileLimit(len(selectedFiles)),
 		maxListTreeCalls: envIntOrDefault("GIT_AI_MAX_LIST_TREE_CALLS", 1),
 		compactMode:      ps.CompactMode,
 		toolCache:        make(map[string]string),
@@ -896,6 +896,28 @@ func envIntOrDefault(key string, def int) int {
 	return n
 }
 
+// dynReadFileLimit 根据变更文件数量动态计算 read_file 调用上限。
+// 小变更集保持 4 次，大变更集逐步放宽到 16 次。
+// 用户可通过 GIT_AI_MAX_READ_FILE_CALLS 环境变量覆盖。
+func dynReadFileLimit(fileCount int) int {
+	envVal := os.Getenv("GIT_AI_MAX_READ_FILE_CALLS")
+	if envVal != "" {
+		if n, err := strconv.Atoi(strings.TrimSpace(envVal)); err == nil && n > 0 {
+			return n
+		}
+	}
+	switch {
+	case fileCount <= 3:
+		return 4
+	case fileCount <= 10:
+		return 8
+	case fileCount <= 25:
+		return 12
+	default:
+		return 16
+	}
+}
+
 func categoryLabel(cat git.ErrorCategory) string {
 	switch cat {
 	case git.ErrorRecoverable:
@@ -1111,6 +1133,13 @@ func buildUnderstandSystemPrompt(conventionInfo git.ConventionInfo) string {
 	b.WriteString("你是资深代码审查助手。当前阶段：【理解变更】。\n\n")
 	b.WriteString("你的任务是阅读并理解代码变更，然后调用 summarize_changes 提交结构化理解。\n\n")
 
+	b.WriteString("【大变更集处理策略】\n")
+	b.WriteString("- diff 开头可能包含「变更文件分组（按目录）」索引，按目录列出所有变更文件及数量\n")
+	b.WriteString("- 先看分组索引了解全貌，再决定读哪些文件\n")
+	b.WriteString("- 优先读取 core 类型文件（核心业务逻辑），跳过 test/config/generated 文件\n")
+	b.WriteString("- 每个文件用 start_line/end_line 限定行范围，不要读整个文件\n")
+	b.WriteString("- 同一目录下的文件通常相关，可以一起理解\n\n")
+
 	b.WriteString("【执行步骤】\n")
 	b.WriteString("1. diff_overview → 了解变更概览（无需授权，自动执行）\n")
 	b.WriteString("2. read_file → 读取关键变更代码（指定行范围，勿读整个文件）\n")
@@ -1167,6 +1196,7 @@ func buildUnderstandUserPrompt(diffContent, description string) string {
 func buildUnderstandSystemPromptCompact(conventionInfo git.ConventionInfo) string {
 	var b strings.Builder
 	b.WriteString("当前阶段：【理解变更】。阅读代码理解变更后调用 summarize_changes。\n\n")
+	b.WriteString("大变更集: 先看开头的文件分组索引了解全貌, 优先读 core 文件, 跳过 test/config。\n")
 	b.WriteString("步骤: diff_overview → read_file → 输出理解 → summarize_changes\n")
 	b.WriteString("不要审查风险，不要提交。理解够了就调用 summarize_changes。\n")
 	b.WriteString("控制输出长度，diff 可能被截断用 read_file 补全。\n")
