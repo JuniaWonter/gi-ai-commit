@@ -90,16 +90,35 @@ func CommitAmend(message string) CommitResult {
 }
 
 func parseCommitHash(output string) string {
+	// Git commit output format: [branch hash] message
+	// Example: [main abc1234] commit message
+	// Example: [feat/message-center def5678] commit message
 	lines := strings.Split(output, "\n")
 	for _, line := range lines {
 		line = strings.TrimSpace(line)
-		if strings.HasPrefix(line, "[") && strings.Contains(line, " ") {
-			parts := strings.SplitN(line, " ", 2)
-			if len(parts) >= 1 {
-				hash := strings.TrimPrefix(parts[0], "[")
-				hash = strings.TrimSuffix(hash, "]")
-				if len(hash) >= 7 {
-					return hash
+		if strings.HasPrefix(line, "[") && strings.Contains(line, "]") {
+			// Extract content between [ and ]
+			start := strings.Index(line, "[")
+			end := strings.Index(line, "]")
+			if start >= 0 && end > start {
+				content := line[start+1 : end]
+				// Content is "branch hash", hash is the last part
+				parts := strings.Fields(content)
+				if len(parts) >= 2 {
+					hash := parts[len(parts)-1]
+					// Validate it looks like a git hash (7-40 hex chars)
+					if len(hash) >= 7 && len(hash) <= 40 {
+						isHex := true
+						for _, c := range hash {
+							if !((c >= '0' && c <= '9') || (c >= 'a' && c <= 'f') || (c >= 'A' && c <= 'F')) {
+								isHex = false
+								break
+							}
+						}
+						if isHex {
+							return hash
+						}
+					}
 				}
 			}
 		}

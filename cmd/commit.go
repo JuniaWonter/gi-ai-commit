@@ -143,7 +143,6 @@ func RunCommit(opts CommitOptions) error {
 		// Distinguish between different failure modes
 		switch result.Error {
 		case "user_cancel":
-			logger.Info("用户取消提交")
 			return fmt.Errorf("用户取消提交")
 		case "ai_failure":
 			logger.Error("AI 执行失败，未能完成提交流程")
@@ -172,7 +171,7 @@ func RunCommit(opts CommitOptions) error {
 	count, _ := counter.Get()
 	const memoryUpdateInterval = 5
 	if memory.ShouldUpdate(count, memoryUpdateInterval) {
-		go updateMemory(client, result.CommitMessage, result)
+		updateMemory(client, result.CommitMessage, result)
 	}
 
 	logger.Info("提交成功 commitHash=%s", result.CommitHash)
