@@ -48,7 +48,7 @@ go test -v ./internal/diff/ -run TestParseNumStat
 
 **Session timeout**: 10-minute timeout protection prevents infinite loops. Timeout errors are distinguished from user cancellations and AI failures in error messages.
 
-**Error handling**: Distinguishes between user cancel (exit 130), AI failure (exit 2), stage failure (exit 3), and timeout (exit 4). Error reasons are logged and displayed to users with actionable suggestions.
+**Error handling**: Distinguishes between user cancel (exit 130), AI failure (exit 2), and timeout (exit 4). Error reasons are logged and displayed to users with actionable suggestions.
 
 **Truncation detection**: `finish_reason=length` + heuristic rules → auto-retry with degradation or extract commit message from truncated output
 
