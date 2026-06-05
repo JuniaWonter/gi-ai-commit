@@ -182,6 +182,8 @@ type CommitSession struct {
 	ReviewResult *ReviewResult
 	// Skill 系统
 	skillManager *skill.Manager
+	// 用户输入（用于 ask_user 工具）
+	askUserAnswer string
 }
 
 type ReviewResult struct {
@@ -201,6 +203,12 @@ type ReviewRisk struct {
 	Line        int
 	Description string
 	Suggestion  string
+}
+
+func (s *CommitSession) SetAskUserAnswer(answer string) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	s.askUserAnswer = answer
 }
 
 type StreamChunk struct {
@@ -980,6 +988,15 @@ func (s *CommitSession) executeToolCallWithLimit(name, argsJSON string) string {
 		}
 		s.updateMemoryCalls++
 		s.mu.Unlock()
+	case "ask_user":
+		s.mu.Lock()
+		answer := s.askUserAnswer
+		s.askUserAnswer = ""
+		s.mu.Unlock()
+		if answer != "" {
+			return fmt.Sprintf("USER_ANSWER: %s", answer)
+		}
+		return "ERROR: 用户未提供回答"
 	}
 
 	// Check if it's a skill tool
@@ -1292,6 +1309,14 @@ func buildAuthSystemPrompt(conventionInfo git.ConventionInfo, scopeHints []strin
 		b.WriteString("适用场景：理解复杂调用链、评估重构影响、搜索代码结构\n")
 	}
 
+	b.WriteString("\n【用户交互工具】\n")
+	b.WriteString("当遇到不确定的决策时，使用 ask_user 工具向用户提问：\n")
+	b.WriteString("- 多种实现方案需要用户选择\n")
+	b.WriteString("- 发现潜在问题但不确定用户意图\n")
+	b.WriteString("- 需要用户确认某个设计决策\n")
+	b.WriteString("- 遇到模糊需求需要澄清\n")
+	b.WriteString("工具会弹出交互界面让用户选择或输入，等待用户回答后继续执行。\n")
+
 	b.WriteString("\n【规则】\n")
 	b.WriteString("- diff 内容可能被截断：如果 seen 的 patch 不全，用 read_file 补全关键代码\n")
 	b.WriteString("- 先读代码后判断，不可凭文件名猜测风险\n")
@@ -1343,6 +1368,7 @@ func buildAuthSystemPromptCompact(conventionInfo git.ConventionInfo, scopeHints 
 		b.WriteString("代码图工具: codegraph_search/explore/callers/callees/impact/node 可用于深入分析代码结构和调用关系\n")
 	}
 
+	b.WriteString("用户交互: 遇到不确定决策时用 ask_user 向用户提问\n")
 	b.WriteString("规则: 读代码再判断; report_review 在 git_commit 前; commit 描述变更本身; git_commit 是目标; 失败用 amend; 发现重要模式可 update_memory(最多1次)\n")
 
 	return b.String()

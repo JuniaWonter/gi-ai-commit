@@ -228,6 +228,42 @@ var ToolDefinitions = []ToolDefinition{
 			"required": ["content", "action"]
 		}`),
 	},
+	{
+		Name:        "ask_user",
+		Description: "向用户提问并等待回答。当你遇到不确定的决策、需要用户选择方案、或需要用户确认某个选择时使用此工具。会弹出交互界面让用户选择或输入。",
+		Parameters: json.RawMessage(`{
+			"type": "object",
+			"properties": {
+				"question": {
+					"type": "string",
+					"description": "要向用户提出的问题"
+				},
+				"options": {
+					"type": "array",
+					"items": {
+						"type": "object",
+						"properties": {
+							"label": {
+								"type": "string",
+								"description": "选项的简短标签（1-5 个词）"
+							},
+							"description": {
+								"type": "string",
+								"description": "选项的详细说明"
+							}
+						},
+						"required": ["label"]
+					},
+					"description": "可选项列表，用户可以从中选择"
+				},
+				"allow_custom": {
+					"type": "boolean",
+					"description": "是否允许用户输入自定义答案（默认 true）"
+				}
+			},
+			"required": ["question"]
+		}`),
+	},
 }
 
 func FindToolDef(name string) *ToolDefinition {

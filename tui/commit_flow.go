@@ -1,6 +1,7 @@
 package tui
 
 import (
+	"encoding/json"
 	"fmt"
 	"os"
 	"os/exec"
@@ -22,6 +23,7 @@ type phase int
 const (
 	phaseSelectFiles phase = iota
 	phaseStreaming
+	phaseAskUser
 	phaseDone
 )
 
@@ -111,6 +113,9 @@ type CommitFlowModel struct {
 	userAuthorized   bool
 	lastPendingCalls []ai.PendingToolCall // saved for overlay confirmation
 	reviewResult     *ai.ReviewResult     // captured from report_review tool call
+
+	// Ask user state
+	askUserPending *ai.PendingToolCall // the ask_user tool call being answered
 }
 
 func NewCommitFlowModel(files []diff.FileChange, opts CommitFlowOptions) *CommitFlowModel {
@@ -180,6 +185,9 @@ func (m *CommitFlowModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 
 	case OverlayResult:
 		return m.handleOverlayResult(msg)
+
+	case askUserDoneMsg:
+		return m.handleAskUserDone(msg)
 	}
 
 	// --- Overlay takes priority ---
@@ -354,6 +362,13 @@ func (m *CommitFlowModel) handleAiRound(msg aiRoundMsg) (tea.Model, tea.Cmd) {
 	sp.FlushStream()
 	sp.AppendToolCall(msg.pending)
 
+	// Check if we need to ask user
+	if askUserCall := m.findAskUserCall(msg.pending); askUserCall != nil {
+		m.askUserPending = askUserCall
+		m.switchToAskUser(askUserCall)
+		return m, nil
+	}
+
 	// Check if we need confirmation
 	if m.requiresConfirm(msg.pending) {
 		sp.SetAwaitingConfirm(true, m.hasSummarizeCall(msg.pending))
@@ -423,6 +438,98 @@ func (m *CommitFlowModel) overlayType(pending []ai.PendingToolCall) OverlayType 
 		}
 	}
 	return OverlayConfirmCommit
+}
+
+func (m *CommitFlowModel) findAskUserCall(pending []ai.PendingToolCall) *ai.PendingToolCall {
+	for i, tc := range pending {
+		if tc.Name == "ask_user" {
+			return &pending[i]
+		}
+	}
+	return nil
+}
+
+func (m *CommitFlowModel) switchToAskUser(call *ai.PendingToolCall) {
+	m.phase = phaseAskUser
+	m.header.PhaseLabel = "用户输入"
+
+	var question string
+	var options []AskUserOption
+	allowCustom := true
+
+	var args struct {
+		Question    string `json:"question"`
+		Options     []struct {
+			Label       string `json:"label"`
+			Description string `json:"description"`
+		} `json:"options"`
+		AllowCustom *bool `json:"allow_custom"`
+	}
+	if err := json.Unmarshal([]byte(call.ArgsJSON), &args); err == nil {
+		question = args.Question
+		for _, opt := range args.Options {
+			options = append(options, AskUserOption{
+				Label:       opt.Label,
+				Description: opt.Description,
+			})
+		}
+		if args.AllowCustom != nil {
+			allowCustom = *args.AllowCustom
+		}
+	}
+
+	if question == "" {
+		question = "请选择："
+	}
+
+	askPanel := NewAskUserPanel(question, options, allowCustom)
+	askPanel.SetViewportSize(m.termWidth, m.termHeight-2)
+	m.panel = askPanel
+}
+
+func (m *CommitFlowModel) handleAskUserDone(msg askUserDoneMsg) (tea.Model, tea.Cmd) {
+	m.phase = phaseStreaming
+	m.header.PhaseLabel = "AI 分析"
+
+	result := msg.result
+	answer := result.Selected
+	if answer == "" {
+		answer = result.Custom
+	}
+
+	if sp, ok := m.panel.(*StreamingPanel); ok {
+		sp.AppendOutput(fmt.Sprintf("→ 用户回答: %s", answer))
+		sp.Reset()
+	} else {
+		sp := NewStreamingPanel(m.stagedDiffMode)
+		sp.SetViewportSize(m.termWidth, m.termHeight-2)
+		m.panel = sp
+		sp.AppendOutput(fmt.Sprintf("→ 用户回答: %s", answer))
+		sp.Reset()
+	}
+
+	if m.askUserPending == nil {
+		return m, nil
+	}
+
+	m.session.SetAskUserAnswer(answer)
+
+	pending := m.lastPendingCalls
+	m.lastPendingCalls = nil
+	m.askUserPending = nil
+
+	authorized := make([]bool, len(pending))
+	for i, tc := range pending {
+		if tc.Name == "ask_user" {
+			authorized[i] = true
+		} else if tc.Name == "git_commit" || tc.Name == "git_commit_amend" {
+			authorized[i] = m.userAuthorized
+		} else {
+			authorized[i] = true
+		}
+	}
+
+	return m, m.execPendingCmd(pending, authorized)
 }
 
 // --- Commands ---
@@ -648,7 +755,6 @@ func RunCommitFlow(files []diff.FileChange, opts CommitFlowOptions) (CommitFlowR
 
 	p := tea.NewProgram(m,
 		tea.WithAltScreen(),
-		tea.WithMouseCellMotion(),
 	)
 
 	model, err := p.Run()

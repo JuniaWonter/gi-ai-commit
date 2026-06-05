@@ -51,7 +51,7 @@ func (p *StreamingPanel) SetViewportSize(width, height int) {
 	if !p.vpReady {
 		p.viewport = viewport.New(width, contentH)
 		p.viewport.Style = lipgloss.NewStyle().Padding(0, 1)
-		p.viewport.MouseWheelEnabled = true
+		p.viewport.MouseWheelEnabled = false
 		p.vpReady = true
 	} else {
 		p.viewport.Width = width
