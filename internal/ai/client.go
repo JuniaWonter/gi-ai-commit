@@ -848,16 +848,41 @@ func (s *CommitSession) GetResult() CommitResult {
 }
 
 // fillFallbackTokenEstimate 在 API 未返回 token 用量时，用本地估算作为兜底
+// 考虑了工具定义、消息格式开销、reasoning tokens
 func (s *CommitSession) fillFallbackTokenEstimate(outputContent string) {
 	var inputText strings.Builder
+
+	// 累加所有消息内容
 	for _, msg := range s.messages {
 		inputText.WriteString(msg.Content)
+		// 累加 tool call 的 function name 和 arguments
 		for _, tc := range msg.ToolCalls {
 			inputText.WriteString(tc.Function.Name)
 			inputText.WriteString(tc.Function.Arguments)
 		}
+		// 累加 reasoning content（thinking tokens）
+		if msg.ReasoningContent != "" {
+			inputText.WriteString(msg.ReasoningContent)
+		}
 	}
-	s.promptTokens = estimateTokenCount(inputText.String())
+
+	// 累加工具定义的 JSON schema（这是 prompt 的一部分）
+	for _, tool := range s.tools {
+		if tool.Function != nil {
+			inputText.WriteString(tool.Function.Name)
+			inputText.WriteString(tool.Function.Description)
+			if tool.Function.Parameters != nil {
+				if params, ok := tool.Function.Parameters.(json.RawMessage); ok {
+					inputText.WriteString(string(params))
+				}
+			}
+		}
+	}
+
+	// 消息格式开销：每条消息约 4 tokens（role marker + special tokens）
+	messageOverhead := len(s.messages) * 4
+
+	s.promptTokens = estimateTokenCount(inputText.String()) + messageOverhead
 	s.completionTokens = estimateTokenCount(outputContent)
 	s.totalTokens = s.promptTokens + s.completionTokens
 }
@@ -1443,7 +1468,7 @@ func buildGenerateSystemPrompt(conventionInfo git.ConventionInfo) string {
 	b.WriteString("格式: <type>(<scope>): <subject>\n")
 	b.WriteString("type: feat|fix|docs|style|refactor|perf|test|build|ci|chore|revert\n")
 	b.WriteString("scope: 可选\n")
-	b.WriteString("subject: 中文，具体，≤72字符\n")
+	b.WriteString("subject: 中文，具体\n")
 	b.WriteString("破坏性变更: type!: 或 BREAKING CHANGE:\n")
 	b.WriteString("只基于本次变更生成，不编造未发生的改动\n\n")
 
@@ -1544,7 +1569,7 @@ func buildAuthSystemPrompt(conventionInfo git.ConventionInfo, scopeHints []strin
 	b.WriteString("<type>(<scope>): <subject>\n")
 	b.WriteString("type: feat|fix|docs|style|refactor|perf|test|build|ci|chore|revert\n")
 	b.WriteString("scope: 可选\n")
-	b.WriteString("subject: 中文，具体，≤50字符\n")
+	b.WriteString("subject: 中文，具体\n")
 	b.WriteString("破坏性变更: type!: 或 BREAKING CHANGE:\n")
 
 	if len(scopeHints) > 0 {
@@ -1757,9 +1782,13 @@ func buildUnderstandUserPromptCompact(diffContent string) string {
 	return b.String()
 }
 
-// 估计 token 数（简单启发式算法）
-// 1 token ≈ 4 个中文字符或 1.3 个英文单词
+// 估计 token 数（改进的启发式算法）
+// 考虑了工具定义、消息格式开销、reasoning tokens
 func estimateTokenCount(text string) int {
+	if text == "" {
+		return 0
+	}
+
 	// 计数中文字符和英文单词
 	chineseCount := 0
 	englishCount := 0
@@ -1772,8 +1801,12 @@ func estimateTokenCount(text string) int {
 
 	englishCount = len(text) - chineseCount
 
-	// 简单估计：中文 4 个字 = 1 token，英文 4 个字 = 1 token
-	return (chineseCount + englishCount) / 4
+	// 中文：约 2 个字 = 1 token（DeepSeek/Qwen 等模型）
+	// 英文：约 4 个字符 = 1 token
+	chineseTokens := chineseCount / 2
+	englishTokens := englishCount / 4
+
+	return chineseTokens + englishTokens
 }
 
 // truncateCompact - 比 truncate 更激进的截断
