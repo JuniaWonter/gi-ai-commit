@@ -255,8 +255,8 @@ func GetBlame(path string, startLine, endLine int) (string, error) {
 	}
 
 	output := strings.Join(result, "\n")
-	if len(output) > 3000 {
-		output = output[:3000] + "\n...(truncated)"
+	if runes := []rune(output); len(runes) > 3000 {
+		output = string(runes[:3000]) + "\n...(truncated)"
 	}
 	return output, nil
 }

@@ -178,7 +178,7 @@ func compressMessagesForSave(messages []openai.ChatCompletionMessage) []openai.C
 		} else if msg.Role == openai.ChatMessageRoleTool {
 			// 判断这个 tool result 对应的 tool 类型
 			isReadFile := strings.Contains(msg.Content, "file:")
-			isListTree := strings.Contains(msg.Content, "PROJECT TREE") || strings.Contains(msg.Content, "PROJECT TREE")
+			isListTree := strings.Contains(msg.Content, "PROJECT TREE")
 			isDiffOverview := strings.Contains(msg.Content, "变更统计")
 
 			if isReadFile || isListTree || isDiffOverview {

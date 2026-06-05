@@ -109,6 +109,7 @@ func (c *Client) Close() error {
 			// Session closed successfully
 		case <-time.After(2 * time.Second):
 			// Timeout - force kill will handle cleanup
+			// Note: goroutine above may leak, but we're shutting down anyway
 		}
 	}
 	
@@ -127,9 +128,11 @@ func (c *Client) Close() error {
 		case <-done:
 			// Process exited gracefully
 		case <-time.After(1 * time.Second):
-			// Force kill
+			// Force kill - the goroutine's Wait() will return after Kill()
 			c.cmd.Process.Kill()
-			c.cmd.Wait()
+			// Don't call Wait() here - the goroutine above will handle it
+			// Wait for the goroutine to finish (should be immediate after Kill)
+			<-done
 		}
 	}
 	return nil

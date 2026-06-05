@@ -98,7 +98,9 @@ func RemoveFromGitignore(entry string) error {
 		}
 		w.WriteString(line + "\n")
 	}
-	w.Flush()
+	if err := w.Flush(); err != nil {
+		return fmt.Errorf("写入 .gitignore 失败：%w", err)
+	}
 
 	return nil
 }

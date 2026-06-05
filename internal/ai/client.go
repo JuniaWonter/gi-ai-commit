@@ -6,7 +6,6 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
-	"runtime"
 	"sort"
 	"strconv"
 	"strings"
@@ -590,7 +589,10 @@ func (s *CommitSession) StreamAI(send func(chunk StreamChunk)) ([]PendingToolCal
 	var pending []PendingToolCall
 	for _, tc := range toolCalls {
 		var args map[string]interface{}
-		json.Unmarshal(json.RawMessage(tc.Function.Arguments), &args)
+		if err := json.Unmarshal(json.RawMessage(tc.Function.Arguments), &args); err != nil {
+			logger.Warn("Failed to parse tool arguments: %v, args: %s", err, tc.Function.Arguments)
+			// Still add the pending call, but with nil args - executeToolCall will handle the error
+		}
 		pending = append(pending, PendingToolCall{
 			ID:       tc.ID,
 			Name:     tc.Function.Name,
@@ -796,12 +798,9 @@ func (s *CommitSession) compressMessagesInMemory() {
 		return // Don't compress short sessions
 	}
 
-	// Log memory usage before compression
-	var memBefore runtime.MemStats
-	runtime.ReadMemStats(&memBefore)
-	logger.Debug("Memory before compression: Alloc=%d MB, Sys=%d MB", 
-		memBefore.Alloc/1024/1024, memBefore.Sys/1024/1024)
+	originalLen := len(s.messages)
 
+	// Build the kept messages by appending (O(n)) then reversing
 	var keep []openai.ChatCompletionMessage
 	keep = append(keep, s.messages[0]) // system prompt
 
@@ -809,43 +808,35 @@ func (s *CommitSession) compressMessagesInMemory() {
 	toolRoundsFromEnd := 0
 	maxToolRoundsToKeep := 3
 
+	// Collect messages to keep (in reverse order, excluding system prompt)
+	var tail []openai.ChatCompletionMessage
 	for i := len(s.messages) - 1; i >= 1; i-- {
 		msg := s.messages[i]
 
 		if msg.Role == openai.ChatMessageRoleTool {
 			isReadFile := strings.Contains(msg.Content, "file:")
-			isListTree := strings.Contains(msg.Content, "PROJECT TREE")
+			isListTree := strings.Contains(msg.Content, "PROJECT TREE") || strings.Contains(msg.Content, "PROJECT TREE")
 			isDiffOverview := strings.Contains(msg.Content, "变更统计")
 
 			if isReadFile || isListTree || isDiffOverview {
 				toolRoundsFromEnd++
 				if toolRoundsFromEnd <= maxToolRoundsToKeep {
-					keep = append([]openai.ChatCompletionMessage{msg}, keep...)
+					tail = append(tail, msg)
 				}
-				// Skip older tool results
 				continue
 			}
 		}
 
-		// Keep all other messages (assistant, user, critical tool results)
-		keep = append([]openai.ChatCompletionMessage{msg}, keep...)
+		tail = append(tail, msg)
+	}
+
+	// Reverse tail and append to keep
+	for i := len(tail) - 1; i >= 0; i-- {
+		keep = append(keep, tail[i])
 	}
 
 	s.messages = keep
-	
-	// Force garbage collection after compression
-	runtime.GC()
-	
-	var memAfter runtime.MemStats
-	runtime.ReadMemStats(&memAfter)
-	logger.Debug("Compressed messages from %d to %d, Memory: Alloc=%d MB -> %d MB", 
-		len(s.messages), len(keep), 
-		memBefore.Alloc/1024/1024, memAfter.Alloc/1024/1024)
-	
-	// Warn if memory is getting too high (>500MB)
-	if memAfter.Alloc > 500*1024*1024 {
-		logger.Warn("High memory usage detected: %d MB", memAfter.Alloc/1024/1024)
-	}
+	logger.Debug("Compressed messages from %d to %d", originalLen, len(keep))
 }
 
 // transitionToPhase2 从理解阶段切换到审查提交阶段
@@ -977,6 +968,11 @@ func executeToolCall(name, argsJSON string) string {
 			logger.Error("git_commit 参数解析失败: %v", err)
 			return fmt.Sprintf("ERROR: 解析参数失败：%v", err)
 		}
+		// Validate commit message quality
+		if err := validateCommitMessage(args.Message); err != nil {
+			logger.Warn("git_commit 消息质量不合格: %v, message: %s", err, args.Message)
+			return fmt.Sprintf("REJECTED: commit message 质量不合格：%v\n请重新生成更具体的 commit message。\n当前 message: %s", err, args.Message)
+		}
 		result := git.Commit(args.Message)
 		if result.Success {
 			logger.Info("git_commit 成功 hash=%s", result.Hash)
@@ -994,6 +990,11 @@ func executeToolCall(name, argsJSON string) string {
 		if err := json.Unmarshal(json.RawMessage(argsJSON), &args); err != nil {
 			logger.Error("git_commit_amend 参数解析失败: %v", err)
 			return fmt.Sprintf("ERROR: 解析参数失败：%v", err)
+		}
+		// Validate commit message quality
+		if err := validateCommitMessage(args.Message); err != nil {
+			logger.Warn("git_commit_amend 消息质量不合格: %v, message: %s", err, args.Message)
+			return fmt.Sprintf("REJECTED: commit message 质量不合格：%v\n请重新生成更具体的 commit message。\n当前 message: %s", err, args.Message)
 		}
 		result := git.CommitAmend(args.Message)
 		if result.Success {
@@ -1073,29 +1074,45 @@ func executeToolCall(name, argsJSON string) string {
 		if err := json.Unmarshal(json.RawMessage(argsJSON), &args); err != nil {
 			return fmt.Sprintf("ERROR: 解析参数失败：%v", err)
 		}
-		result := fmt.Sprintf("REVIEW_RESULT:\n摘要: %s\n建议: %s\n风险: ", args.Summary, args.Recommendation)
+		
+		var result strings.Builder
 		if args.IsSimple {
-			result = "REVIEW_RESULT:\n摘要: " + args.Summary + "\n建议: approve (简单变更)\n风险: 无 (简单变更跳过详细审查)"
-		} else if args.HasRisk && len(args.Risks) > 0 {
-			for i, r := range args.Risks {
-				sev, _ := r["severity"].(string)
-				cat, _ := r["category"].(string)
-				desc, _ := r["description"].(string)
-				file, _ := r["file"].(string)
-				sug, _ := r["suggestion"].(string)
-				result += fmt.Sprintf("\n  [%d] [%s/%s]", i+1, sev, cat)
-				if file != "" {
-					result += fmt.Sprintf(" %s", file)
-				}
-				result += fmt.Sprintf(": %s", desc)
-				if sug != "" {
-					result += fmt.Sprintf(" (建议: %s)", sug)
-				}
-			}
+			result.WriteString("REVIEW_RESULT:\n摘要: ")
+			result.WriteString(args.Summary)
+			result.WriteString("\n建议: approve (简单变更)\n风险: 无 (简单变更跳过详细审查)")
 		} else {
-			result += "无风险"
+			result.WriteString("REVIEW_RESULT:\n摘要: ")
+			result.WriteString(args.Summary)
+			result.WriteString("\n建议: ")
+			result.WriteString(args.Recommendation)
+			result.WriteString("\n风险: ")
+			
+			if args.HasRisk && len(args.Risks) > 0 {
+				for i, r := range args.Risks {
+					sev, _ := r["severity"].(string)
+					cat, _ := r["category"].(string)
+					desc, _ := r["description"].(string)
+					file, _ := r["file"].(string)
+					sug, _ := r["suggestion"].(string)
+					
+					fmt.Fprintf(&result, "\n  [%d] [%s/%s]", i+1, sev, cat)
+					if file != "" {
+						result.WriteString(" ")
+						result.WriteString(file)
+					}
+					result.WriteString(": ")
+					result.WriteString(desc)
+					if sug != "" {
+						result.WriteString(" (建议: ")
+						result.WriteString(sug)
+						result.WriteString(")")
+					}
+				}
+			} else {
+				result.WriteString("无风险")
+			}
 		}
-		return result
+		return result.String()
 
 	case "update_memory":
 		var args struct {
@@ -1469,10 +1486,11 @@ func extractRawError(result string) string {
 }
 
 func truncate(s string, maxLen int) string {
-	if len(s) <= maxLen {
+	runes := []rune(s)
+	if len(runes) <= maxLen {
 		return s
 	}
-	return s[:maxLen] + "...(已截断)"
+	return string(runes[:maxLen]) + "...(已截断)"
 }
 
 func buildOpenAITools() []openai.Tool {
@@ -1613,7 +1631,7 @@ func buildAuthSystemPrompt(conventionInfo git.ConventionInfo, scopeHints []strin
 	b.WriteString("<type>(<scope>): <subject>\n")
 	b.WriteString("type: feat|fix|docs|style|refactor|perf|test|build|ci|chore|revert\n")
 	b.WriteString("scope: 可选\n")
-	b.WriteString("subject: 中文，具体描述代码变更内容\n")
+	b.WriteString("subject: 中文，具体描述代码变更内容，**至少 20 个字符**\n")
 	b.WriteString("破坏性变更: type!: 或 BREAKING CHANGE:\n\n")
 	
 	b.WriteString("【Commit Message 质量要求】\n")
@@ -1719,8 +1737,8 @@ func buildAuthSystemPromptCompact(conventionInfo git.ConventionInfo, scopeHints 
 	b.WriteString("⚠️ 必须调用 git_commit 完成提交，仅调用 report_review 不算完成任务。\n")
 	b.WriteString("Commit 格式: <type>(<scope>): <subject>\n")
 	b.WriteString("type: feat|fix|docs|style|refactor|perf|test|build|ci|chore|revert\n")
-	b.WriteString("subject 必须具体描述改了什么，禁止使用「提交变更」「添加功能」「修复问题」等泛化表述。\n")
-	b.WriteString("好的例子: feat(auth): 添加 OAuth2 登录支持 / fix(api): 修复分页查询返回空结果\n")
+	b.WriteString("subject 必须具体描述改了什么（至少 20 个字符），禁止使用「提交变更」「添加功能」「修复问题」等泛化表述。\n")
+	b.WriteString("好的例子: feat(auth): 添加 OAuth2 登录支持，集成第三方认证服务 / fix(api): 修复分页查询返回空结果的问题，添加默认值处理\n")
 
 	if len(scopeHints) > 0 {
 		b.WriteString("推荐 scope: " + strings.Join(scopeHints[:minInt(3, len(scopeHints))], ", ") + "\n")
@@ -1877,10 +1895,11 @@ func estimateTokenCount(text string) int {
 
 // truncateCompact - 比 truncate 更激进的截断
 func truncateCompact(s string, maxLen int) string {
-	if len(s) <= maxLen {
+	runes := []rune(s)
+	if len(runes) <= maxLen {
 		return s
 	}
-	return s[:maxLen] + "\n...(diff 已大幅截断，仅保留关键部分)"
+	return string(runes[:maxLen]) + "\n...(diff 已大幅截断，仅保留关键部分)"
 }
 
 // escapeJSON - 转义 JSON 字符串
@@ -2248,6 +2267,65 @@ func (c *Client) GenerateMemory(commitMsg, reviewSummary, existingMemory, diffCo
 	}
 
 	return strings.TrimSpace(resp.Choices[0].Message.Content), nil
+}
+
+// validateCommitMessage validates the quality of a commit message.
+// Returns an error if the message is too generic or doesn't meet quality standards.
+func validateCommitMessage(message string) error {
+	// Extract the subject line (first line)
+	lines := strings.Split(strings.TrimSpace(message), "\n")
+	if len(lines) == 0 {
+		return fmt.Errorf("commit message 不能为空")
+	}
+	
+	subject := strings.TrimSpace(lines[0])
+	
+	// Parse the subject to extract type, scope, and description
+	// Format: type(scope): description or type: description
+	var description string
+	if idx := strings.Index(subject, ":"); idx >= 0 {
+		description = strings.TrimSpace(subject[idx+1:])
+	} else {
+		description = subject
+	}
+	
+	// Check minimum length (at least 20 Chinese characters or equivalent)
+	// Count actual characters (not bytes)
+	charCount := len([]rune(description))
+	if charCount < 20 {
+		return fmt.Errorf("subject 描述太短（%d 个字符），需要至少 20 个字符来具体描述变更内容", charCount)
+	}
+	
+	// Check for generic/meaningless subjects
+	genericPatterns := []string{
+		"提交变更",
+		"添加功能",
+		"修复问题",
+		"重构代码",
+		"更新文档",
+		"更新代码",
+		"修改代码",
+		"代码变更",
+		"代码更新",
+		"代码修改",
+		"提交代码",
+		"更新文件",
+		"修改文件",
+		"添加文件",
+		"删除文件",
+		"优化代码",
+		"改进代码",
+		"清理代码",
+	}
+	
+	descriptionLower := strings.ToLower(description)
+	for _, pattern := range genericPatterns {
+		if strings.Contains(descriptionLower, pattern) {
+			return fmt.Errorf("subject 包含泛化表述「%s」，需要具体描述改了什么内容（例如：添加了哪个功能、修复了哪个 bug）", pattern)
+		}
+	}
+	
+	return nil
 }
 
 func buildPrompt(diffContent, description string) string {
