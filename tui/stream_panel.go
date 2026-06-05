@@ -208,7 +208,7 @@ func (p *StreamingPanel) View(width, height int) string {
 		if vis.Len() > 0 {
 			vis.WriteString("\n")
 		}
-		thinkingText := renderStreamText(p.streamThinking.String(), contentW-1)
+		thinkingText := renderMarkdown(p.streamThinking.String(), contentW)
 		vis.WriteString(lipgloss.NewStyle().
 			Foreground(Th.DimText).
 			PaddingLeft(1).
@@ -217,15 +217,10 @@ func (p *StreamingPanel) View(width, height int) string {
 
 	// Content
 	if p.streamContent.Len() > 0 {
-		if p.streamThinking.Len() > 0 {
-			vis.WriteString("\n" + lipgloss.NewStyle().
-				Foreground(Th.DimText).
-				PaddingLeft(1).
-				Render("── 思考结束 ──") + "\n")
-		} else if vis.Len() > 0 {
+		if vis.Len() > 0 {
 			vis.WriteString("\n")
 		}
-		vis.WriteString(renderStreamText(p.streamContent.String(), contentW))
+		vis.WriteString(renderMarkdown(p.streamContent.String(), contentW))
 	}
 
 	// Initial spinner

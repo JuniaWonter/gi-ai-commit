@@ -398,6 +398,28 @@ func (s *CommitSession) StreamAI(send func(chunk StreamChunk)) ([]PendingToolCal
 		req.MaxCompletionTokens = maxTokens
 	}
 
+	// Debug: log messages with reasoning_content for DeepSeek models
+	if strings.Contains(s.client.config.Model, "deepseek") {
+		logger.Debug("Sending %d messages to DeepSeek API", len(s.messages))
+		for i, msg := range s.messages {
+			if msg.Role == openai.ChatMessageRoleAssistant {
+				hasReasoning := msg.ReasoningContent != ""
+				hasToolCalls := len(msg.ToolCalls) > 0
+				logger.Debug("Message[%d] assistant: content=%d chars, reasoning=%v (%d chars), tool_calls=%v (%d)", 
+					i, len(msg.Content), hasReasoning, len(msg.ReasoningContent), hasToolCalls, len(msg.ToolCalls))
+			}
+		}
+		
+		// Log the actual JSON being sent (first 2000 chars)
+		if jsonBytes, err := json.Marshal(req); err == nil {
+			jsonStr := string(jsonBytes)
+			if len(jsonStr) > 2000 {
+				jsonStr = jsonStr[:2000] + "... (truncated)"
+			}
+			logger.Debug("Request JSON: %s", jsonStr)
+		}
+	}
+
 	var stream *openai.ChatCompletionStream
 	var err error
 	var cancel context.CancelFunc
@@ -710,6 +732,9 @@ func (s *CommitSession) ExecuteAndResumeWithStream(pending []PendingToolCall, au
 		}
 	}
 
+	// Compress messages in-memory to prevent OOM on long sessions
+	s.compressMessagesInMemory()
+
 	if committed {
 		return nil, nil
 	}
@@ -736,6 +761,46 @@ func (s *CommitSession) ExecuteAndResumeWithStream(pending []PendingToolCall, au
 		s.retryCount++
 	}
 	return s.StreamAI(send)
+}
+
+// compressMessagesInMemory compresses the message history to prevent OOM on long sessions.
+// Keeps system prompt, recent tool results (last 3 rounds), and all AI/user messages.
+func (s *CommitSession) compressMessagesInMemory() {
+	if len(s.messages) <= 10 {
+		return // Don't compress short sessions
+	}
+
+	var keep []openai.ChatCompletionMessage
+	keep = append(keep, s.messages[0]) // system prompt
+
+	// Count tool result rounds from the end
+	toolRoundsFromEnd := 0
+	maxToolRoundsToKeep := 3
+
+	for i := len(s.messages) - 1; i >= 1; i-- {
+		msg := s.messages[i]
+
+		if msg.Role == openai.ChatMessageRoleTool {
+			isReadFile := strings.Contains(msg.Content, "file:")
+			isListTree := strings.Contains(msg.Content, "PROJECT TREE")
+			isDiffOverview := strings.Contains(msg.Content, "变更统计")
+
+			if isReadFile || isListTree || isDiffOverview {
+				toolRoundsFromEnd++
+				if toolRoundsFromEnd <= maxToolRoundsToKeep {
+					keep = append([]openai.ChatCompletionMessage{msg}, keep...)
+				}
+				// Skip older tool results
+				continue
+			}
+		}
+
+		// Keep all other messages (assistant, user, critical tool results)
+		keep = append([]openai.ChatCompletionMessage{msg}, keep...)
+	}
+
+	s.messages = keep
+	logger.Debug("Compressed messages from %d to %d", len(s.messages), len(keep))
 }
 
 // transitionToPhase2 从理解阶段切换到审查提交阶段

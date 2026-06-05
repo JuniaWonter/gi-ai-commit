@@ -38,7 +38,7 @@ go test -v ./internal/diff/ -run TestParseNumStat
 
 **Diff degradation**: Auto-selects strategy by byte count (full → compact summary sorted by change size → file list + on-demand `read_diff`)
 
-**Token management**: Estimates tokens at startup; >85% context window triggers compact mode (aggressive truncation + shorter prompt). Conversation history auto-compresses (keeps last 3 tool results).
+**Token management**: Estimates tokens at startup; >85% context window triggers compact mode (aggressive truncation + shorter prompt). Conversation history auto-compresses in-memory after each round (keeps last 3 tool results, discards older read_file/list_tree/diff_overview results) to prevent OOM on long sessions.
 
 **Truncation detection**: `finish_reason=length` + heuristic rules → auto-retry with degradation or extract commit message from truncated output
 
@@ -56,8 +56,6 @@ go test -v ./internal/diff/ -run TestParseNumStat
 - **contentH** must clamp to ≥1 after subtraction
 - **Overlay** is a bottom confirmation bar, not a screen overlay (replaces FooterBar). Only used for `summarize_changes` phase transition; git_commit uses `ask_user` tool instead
 - **renderMarkdown** needs `Width()` set on all lines for wrapping
-- **Streaming rendering**: Live `streamContent`/`streamThinking` use `renderStreamText` (plain text, no regex) to avoid layout jumps as incomplete markdown is parsed. Full `renderMarkdown` only applied to `reviewOutput` after `FlushStream`.
-- **Unclosed code blocks**: `renderStreamText` shows code block content with dim styling even when `` ``` `` hasn't closed yet, preventing content from disappearing during streaming.
 - **Viewport sizing**: `SetViewportSize` must be called once after Panel creation; `WindowSizeMsg` must forward to Panel on resize
 
 ## File type priority
