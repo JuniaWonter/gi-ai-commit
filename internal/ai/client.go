@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"runtime"
 	"sort"
 	"strconv"
 	"strings"
@@ -795,6 +796,12 @@ func (s *CommitSession) compressMessagesInMemory() {
 		return // Don't compress short sessions
 	}
 
+	// Log memory usage before compression
+	var memBefore runtime.MemStats
+	runtime.ReadMemStats(&memBefore)
+	logger.Debug("Memory before compression: Alloc=%d MB, Sys=%d MB", 
+		memBefore.Alloc/1024/1024, memBefore.Sys/1024/1024)
+
 	var keep []openai.ChatCompletionMessage
 	keep = append(keep, s.messages[0]) // system prompt
 
@@ -825,7 +832,20 @@ func (s *CommitSession) compressMessagesInMemory() {
 	}
 
 	s.messages = keep
-	logger.Debug("Compressed messages from %d to %d", len(s.messages), len(keep))
+	
+	// Force garbage collection after compression
+	runtime.GC()
+	
+	var memAfter runtime.MemStats
+	runtime.ReadMemStats(&memAfter)
+	logger.Debug("Compressed messages from %d to %d, Memory: Alloc=%d MB -> %d MB", 
+		len(s.messages), len(keep), 
+		memBefore.Alloc/1024/1024, memAfter.Alloc/1024/1024)
+	
+	// Warn if memory is getting too high (>500MB)
+	if memAfter.Alloc > 500*1024*1024 {
+		logger.Warn("High memory usage detected: %d MB", memAfter.Alloc/1024/1024)
+	}
 }
 
 // transitionToPhase2 从理解阶段切换到审查提交阶段
@@ -1581,19 +1601,39 @@ func buildAuthSystemPrompt(conventionInfo git.ConventionInfo, scopeHints []strin
 	b.WriteString("- git_tag: 管理标签\n")
 	b.WriteString("使用场景：了解项目历史、检查分支状态、暂存不相关变更、查看代码历史等。\n\n")
 
-	b.WriteString("【提交流程】\n")
+	b.WriteString("【提交流程】（必须完成所有步骤）\n")
 	b.WriteString("1. 基于已有理解分析风险，必要时用 read_file 补充阅读\n")
-	b.WriteString("2. 调用 report_review 输出审查意见（建议在 git_commit 之前调用）\n")
+	b.WriteString("2. 调用 report_review 输出审查意见（必须在 git_commit 之前调用）\n")
 	b.WriteString("3. 使用 ask_user 向用户确认 commit message（展示你准备的 message，让用户确认或修改）\n")
 	b.WriteString("4. 调用 git_commit 提交（commit message 基于变更结构摘要，而非审查结论）\n")
 	b.WriteString("5. 提交成功后输出 【最终提交信息】\n\n")
+	b.WriteString("⚠️ 重要：你必须调用 git_commit 完成提交。仅调用 report_review 不算完成任务。如果用户拒绝提交，使用 ask_user 询问原因并记录，但仍需结束流程。\n\n")
 
 	b.WriteString("【Commit 格式】\n")
 	b.WriteString("<type>(<scope>): <subject>\n")
 	b.WriteString("type: feat|fix|docs|style|refactor|perf|test|build|ci|chore|revert\n")
 	b.WriteString("scope: 可选\n")
-	b.WriteString("subject: 中文，具体\n")
-	b.WriteString("破坏性变更: type!: 或 BREAKING CHANGE:\n")
+	b.WriteString("subject: 中文，具体描述代码变更内容\n")
+	b.WriteString("破坏性变更: type!: 或 BREAKING CHANGE:\n\n")
+	
+	b.WriteString("【Commit Message 质量要求】\n")
+	b.WriteString("❌ 禁止使用泛化、无意义的 subject，例如：\n")
+	b.WriteString("   - chore: 提交变更\n")
+	b.WriteString("   - feat: 添加功能\n")
+	b.WriteString("   - fix: 修复问题\n")
+	b.WriteString("   - refactor: 重构代码\n")
+	b.WriteString("   - docs: 更新文档\n\n")
+	b.WriteString("✅ subject 必须具体描述「改了什么」，例如：\n")
+	b.WriteString("   - feat(auth): 添加 OAuth2 登录支持\n")
+	b.WriteString("   - fix(api): 修复分页查询返回空结果的问题\n")
+	b.WriteString("   - refactor(parser): 将 JSON 解析逻辑提取为独立函数\n")
+	b.WriteString("   - docs: 补充 API 错误码说明文档\n")
+	b.WriteString("   - perf(db): 优化用户查询 SQL，减少 JOIN 操作\n\n")
+	b.WriteString("⚠️ 自检清单：\n")
+	b.WriteString("   1. subject 是否能让其他人一眼看出改了什么？\n")
+	b.WriteString("   2. 是否基于实际代码变更，而非审查结论？\n")
+	b.WriteString("   3. 是否避免了「提交变更」「更新代码」等废话？\n")
+	b.WriteString("   如果答案是「否」，重新生成 commit message。\n\n")
 
 	if len(scopeHints) > 0 {
 		b.WriteString("推荐 scope: ")
@@ -1650,7 +1690,7 @@ func buildAuthSystemPrompt(conventionInfo git.ConventionInfo, scopeHints []strin
 	b.WriteString("- 避免在对话中混入无关的长文本，控制每轮输出长度\n")
 	b.WriteString("- tool 结果中已有内容的文件，直接引用，不要重复 read_file\n")
 	b.WriteString("- list_tree 默认 depth=1\n")
-	b.WriteString("- git_commit 是最终目标，失败用 amend 修正，最多 3 次\n")
+	b.WriteString("- git_commit 是最终目标，必须调用。失败用 amend 修正，最多 3 次\n")
 	b.WriteString("- 不可恢复错误时不重试\n")
 	b.WriteString("- 如果发现项目的重要架构模式、团队约定或易错点，可调用 update_memory 记录（每次会话最多 1 次）\n")
 	b.WriteString("- 提交后输出：\n")
@@ -1675,9 +1715,12 @@ func buildAuthSystemPromptCompact(conventionInfo git.ConventionInfo, scopeHints 
 	b.WriteString("先读代码再判断，commit message 描述变更本身不是审查结论。\n")
 	b.WriteString("diff 可能被截断，用 read_file 补全。控制输出长度节约 token。\n\n")
 	b.WriteString("Git 工具: 可自由使用 git_status/log/branch/diff_unstaged/add/restore/stash/blame/tag\n")
-	b.WriteString("步骤: 分析风险 → read_file(需要时) → report_review(建议) → ask_user 确认 message → git_commit\n")
+	b.WriteString("步骤: 分析风险 → read_file(需要时) → report_review(必须) → ask_user 确认 message → git_commit(必须)\n")
+	b.WriteString("⚠️ 必须调用 git_commit 完成提交，仅调用 report_review 不算完成任务。\n")
 	b.WriteString("Commit 格式: <type>(<scope>): <subject>\n")
 	b.WriteString("type: feat|fix|docs|style|refactor|perf|test|build|ci|chore|revert\n")
+	b.WriteString("subject 必须具体描述改了什么，禁止使用「提交变更」「添加功能」「修复问题」等泛化表述。\n")
+	b.WriteString("好的例子: feat(auth): 添加 OAuth2 登录支持 / fix(api): 修复分页查询返回空结果\n")
 
 	if len(scopeHints) > 0 {
 		b.WriteString("推荐 scope: " + strings.Join(scopeHints[:minInt(3, len(scopeHints))], ", ") + "\n")

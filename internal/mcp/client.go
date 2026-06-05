@@ -4,8 +4,10 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"os"
 	"os/exec"
 	"strings"
+	"time"
 
 	"github.com/modelcontextprotocol/go-sdk/mcp"
 )
@@ -95,12 +97,40 @@ func (c *Client) CallTool(ctx context.Context, name string, args map[string]inte
 }
 
 func (c *Client) Close() error {
+	// Close session with timeout to prevent blocking
 	if c.session != nil {
-		c.session.Close()
+		done := make(chan struct{})
+		go func() {
+			c.session.Close()
+			close(done)
+		}()
+		select {
+		case <-done:
+			// Session closed successfully
+		case <-time.After(2 * time.Second):
+			// Timeout - force kill will handle cleanup
+		}
 	}
+	
+	// Kill the process
 	if c.cmd != nil && c.cmd.Process != nil {
-		c.cmd.Process.Kill()
-		c.cmd.Wait()
+		// Send SIGTERM first for graceful shutdown
+		c.cmd.Process.Signal(os.Interrupt)
+		
+		// Wait up to 1 second for graceful shutdown
+		done := make(chan error, 1)
+		go func() {
+			done <- c.cmd.Wait()
+		}()
+		
+		select {
+		case <-done:
+			// Process exited gracefully
+		case <-time.After(1 * time.Second):
+			// Force kill
+			c.cmd.Process.Kill()
+			c.cmd.Wait()
+		}
 	}
 	return nil
 }

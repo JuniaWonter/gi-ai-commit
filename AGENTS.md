@@ -34,6 +34,10 @@ go test -v ./internal/diff/ -run TestParseNumStat
 
 **Git as a tool**: AI has free access to all Git operations (status/log/branch/stash/add/restore/diff/blame/tag). No rigid execution order. AI uses `ask_user` to confirm commit message before calling `git_commit`.
 
+**Phase 2 mandatory commit**: The Phase 2 (审查提交) system prompt explicitly requires the AI to call `git_commit`. The prompt states "必须调用 git_commit 完成提交，仅调用 report_review 不算完成任务" to prevent the AI from finishing early without committing.
+
+**Commit message quality**: The prompt enforces specific, meaningful commit messages. Generic subjects like "提交变更", "添加功能", "修复问题" are explicitly forbidden. The AI must describe what was actually changed (e.g., "feat(auth): 添加 OAuth2 登录支持").
+
 ## Critical patterns
 
 **Diff degradation**: Auto-selects strategy by byte count (full → compact summary sorted by change size → file list + on-demand `read_diff`)
