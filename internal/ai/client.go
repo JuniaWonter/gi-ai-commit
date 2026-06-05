@@ -91,10 +91,9 @@ func (c *Client) GenerateCommitMessage(diffContent, description string) (string,
 	ctx, cancel := context.WithTimeout(context.Background(), c.config.Timeout)
 	defer cancel()
 
-	resp, err := c.client.CreateChatCompletion(ctx, req)
+	resp, err := c.createChatCompletionWithRetry(ctx, req)
 	if err != nil {
-		logger.Error("调用 AI API 失败: %v", err)
-		return "", fmt.Errorf("调用 AI API 失败：%w", err)
+		return "", err
 	}
 
 	if len(resp.Choices) == 0 {
@@ -122,10 +121,9 @@ func (c *Client) GenerateCommitMessageWithConventions(diffContent, description s
 	ctx, cancel := context.WithTimeout(context.Background(), c.config.Timeout)
 	defer cancel()
 
-	resp, err := c.client.CreateChatCompletion(ctx, req)
+	resp, err := c.createChatCompletionWithRetry(ctx, req)
 	if err != nil {
-		logger.Error("调用 AI API 失败: %v", err)
-		return "", fmt.Errorf("调用 AI API 失败：%w", err)
+		return "", err
 	}
 
 	if len(resp.Choices) == 0 {
@@ -221,9 +219,56 @@ func (s *CommitSession) SetAskUserAnswer(answer string) {
 }
 
 type StreamChunk struct {
-	Thinking string
-	Content  string
-	Done     bool
+	Thinking  string
+	Content   string
+	Done      bool
+	RetryInfo string
+}
+
+const (
+	maxRetries    = 3
+	retryInterval = 3 * time.Second
+)
+
+func isRetryableError(err error) bool {
+	if err == nil {
+		return false
+	}
+	msg := err.Error()
+	retryableKeywords := []string{
+		"connection refused", "connection reset", "EOF",
+		"timeout", "timed out", "deadline exceeded",
+		"502", "503", "504", "429",
+		"rate limit", "too many requests",
+		"server error", "internal error",
+	}
+	for _, kw := range retryableKeywords {
+		if strings.Contains(strings.ToLower(msg), strings.ToLower(kw)) {
+			return true
+		}
+	}
+	return false
+}
+
+func (c *Client) createChatCompletionWithRetry(_ context.Context, req openai.ChatCompletionRequest) (openai.ChatCompletionResponse, error) {
+	var resp openai.ChatCompletionResponse
+	var err error
+	for attempt := 1; attempt <= maxRetries; attempt++ {
+		ctx, cancel := context.WithTimeout(context.Background(), c.config.Timeout)
+		resp, err = c.client.CreateChatCompletion(ctx, req)
+		cancel()
+		if err == nil {
+			return resp, nil
+		}
+		if !isRetryableError(err) || attempt == maxRetries {
+			logger.Error("调用 AI API 失败: %v", err)
+			return resp, fmt.Errorf("调用 AI API 失败：%w", err)
+		}
+		logger.Warn("⚠️ API 调用失败，%d 秒后重试 (%d/%d): %v", int(retryInterval.Seconds()), attempt, maxRetries, err)
+		fmt.Fprintf(os.Stderr, "⚠️ API 调用失败，%d 秒后重试 (%d/%d)...\n", int(retryInterval.Seconds()), attempt, maxRetries)
+		time.Sleep(retryInterval)
+	}
+	return resp, err
 }
 
 type CommitResult struct {
@@ -353,14 +398,27 @@ func (s *CommitSession) StreamAI(send func(chunk StreamChunk)) ([]PendingToolCal
 		req.MaxCompletionTokens = maxTokens
 	}
 
-	ctx, cancel := context.WithTimeout(context.Background(), s.client.config.Timeout)
-	defer cancel()
-
-	stream, err := s.client.client.CreateChatCompletionStream(ctx, req)
-	if err != nil {
-		logger.Error("调用 AI API 失败: %v", err)
-		return nil, fmt.Errorf("调用 AI API 失败：%w", err)
+	var stream *openai.ChatCompletionStream
+	var err error
+	var cancel context.CancelFunc
+	for attempt := 1; attempt <= maxRetries; attempt++ {
+		var ctx context.Context
+		ctx, cancel = context.WithTimeout(context.Background(), s.client.config.Timeout)
+		stream, err = s.client.client.CreateChatCompletionStream(ctx, req)
+		if err == nil {
+			break
+		}
+		cancel()
+		if !isRetryableError(err) || attempt == maxRetries {
+			logger.Error("调用 AI API 失败: %v", err)
+			return nil, fmt.Errorf("调用 AI API 失败：%w", err)
+		}
+		retryMsg := fmt.Sprintf("⚠️ API 调用失败，%d 秒后重试 (%d/%d): %v", int(retryInterval.Seconds()), attempt, maxRetries, err)
+		logger.Warn("%s", retryMsg)
+		send(StreamChunk{RetryInfo: retryMsg})
+		time.Sleep(retryInterval)
 	}
+	defer cancel()
 	defer stream.Close()
 
 	var fullContent strings.Builder
@@ -436,6 +494,9 @@ func (s *CommitSession) StreamAI(send func(chunk StreamChunk)) ([]PendingToolCal
 	assistantMsg := openai.ChatCompletionMessage{
 		Role:    openai.ChatMessageRoleAssistant,
 		Content: strings.TrimSpace(fullContent.String()),
+	}
+	if thinking := fullThinking.String(); thinking != "" {
+		assistantMsg.ReasoningContent = thinking
 	}
 	if len(toolCalls) > 0 {
 		assistantMsg.ToolCalls = toolCalls
@@ -1945,10 +2006,9 @@ func (c *Client) GenerateDescription(projectInfo, fileInfo, diffContent string) 
 	ctx, cancel := context.WithTimeout(context.Background(), c.config.Timeout)
 	defer cancel()
 
-	resp, err := c.client.CreateChatCompletion(ctx, req)
+	resp, err := c.createChatCompletionWithRetry(ctx, req)
 	if err != nil {
-		logger.Error("GenerateDescription API 调用失败: %v", err)
-		return "", fmt.Errorf("调用 AI API 失败：%w", err)
+		return "", err
 	}
 
 	if len(resp.Choices) == 0 {
@@ -2014,9 +2074,9 @@ func (c *Client) GenerateMemory(commitMsg, reviewSummary, existingMemory, diffCo
 	ctx, cancel := context.WithTimeout(context.Background(), c.config.Timeout)
 	defer cancel()
 
-	resp, err := c.client.CreateChatCompletion(ctx, req)
+	resp, err := c.createChatCompletionWithRetry(ctx, req)
 	if err != nil {
-		return "", fmt.Errorf("调用 AI API 失败：%w", err)
+		return "", err
 	}
 
 	if len(resp.Choices) == 0 {

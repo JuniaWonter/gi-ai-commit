@@ -19,16 +19,16 @@ type AskUserResult struct {
 }
 
 type AskUserPanel struct {
-	question     string
-	options      []AskUserOption
-	allowCustom  bool
-	cursor       int
-	customInput  textinput.Model
-	useCustom    bool
-	width        int
-	height       int
-	done         bool
-	result       AskUserResult
+	question    string
+	options     []AskUserOption
+	allowCustom bool
+	cursor      int
+	customInput textinput.Model
+	useCustom   bool
+	width       int
+	height      int
+	done        bool
+	result      AskUserResult
 }
 
 func NewAskUserPanel(question string, options []AskUserOption, allowCustom bool) *AskUserPanel {

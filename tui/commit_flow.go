@@ -295,6 +295,9 @@ func (m *CommitFlowModel) handleStreamChunk(msg streamChunkMsg) (tea.Model, tea.
 		// aiRoundMsg follows in the channel — keep reading
 		return m, m.actor.NextMsgCmd()
 	}
+	if msg.chunk.RetryInfo != "" {
+		sp.AppendOutput(msg.chunk.RetryInfo)
+	}
 	if msg.chunk.Thinking != "" {
 		sp.streamThinking.WriteString(msg.chunk.Thinking)
 	}
@@ -458,8 +461,8 @@ func (m *CommitFlowModel) switchToAskUser(call *ai.PendingToolCall) {
 	allowCustom := true
 
 	var args struct {
-		Question    string `json:"question"`
-		Options     []struct {
+		Question string `json:"question"`
+		Options  []struct {
 			Label       string `json:"label"`
 			Description string `json:"description"`
 		} `json:"options"`
