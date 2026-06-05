@@ -209,6 +209,25 @@ var ToolDefinitions = []ToolDefinition{
 			"required": ["understanding"]
 		}`),
 	},
+	{
+		Name:        "update_memory",
+		Description: "更新项目记忆。当你发现项目的重要架构模式、团队约定、易错点或审查规则时，调用此工具记录到项目记忆中。记忆会在后续提交时自动加载，帮助 AI 更好地理解项目上下文。每次会话最多调用 1 次。",
+		Parameters: json.RawMessage(`{
+			"type": "object",
+			"properties": {
+				"content": {
+					"type": "string",
+					"description": "要记录的项目知识（建议 200-500 字），包含：架构模式、代码约定、易错点、审查规则等"
+				},
+				"action": {
+					"type": "string",
+					"enum": ["append", "replace"],
+					"description": "append=追加到现有记忆，replace=完全替换（谨慎使用）"
+				}
+			},
+			"required": ["content", "action"]
+		}`),
+	},
 }
 
 func FindToolDef(name string) *ToolDefinition {

@@ -14,6 +14,7 @@ import (
 
 	"github.com/oliver/git-ai-commit/internal/git"
 	"github.com/oliver/git-ai-commit/internal/logger"
+	"github.com/oliver/git-ai-commit/internal/memory"
 	openai "github.com/sashabaranov/go-openai"
 )
 
@@ -148,28 +149,30 @@ func (p PendingToolCall) ArgString(key string) string {
 }
 
 type CommitSession struct {
-	client             *Client
-	messages           []openai.ChatCompletionMessage
-	tools              []openai.Tool
-	retryCount         int
-	maxRetries         int
-	loopCount          int
-	maxLoops           int
-	toolResults        []ToolCallResult
-	commitMsg          string
-	streaming          bool
-	promptTokens       int
-	completionTokens   int
-	totalTokens        int
-	readFileCalls      int
-	listTreeCalls      int
-	maxReadFileCalls   int
-	maxListTreeCalls   int
-	compactMode        bool
-	noToolCallFallback bool
-	toolCache          map[string]string
-	readFiles          map[string]bool
-	mu                 sync.Mutex
+	client               *Client
+	messages             []openai.ChatCompletionMessage
+	tools                []openai.Tool
+	retryCount           int
+	maxRetries           int
+	loopCount            int
+	maxLoops             int
+	toolResults          []ToolCallResult
+	commitMsg            string
+	streaming            bool
+	promptTokens         int
+	completionTokens     int
+	totalTokens          int
+	readFileCalls        int
+	listTreeCalls        int
+	updateMemoryCalls    int
+	maxReadFileCalls     int
+	maxListTreeCalls     int
+	maxUpdateMemoryCalls int
+	compactMode          bool
+	noToolCallFallback   bool
+	toolCache            map[string]string
+	readFiles            map[string]bool
+	mu                   sync.Mutex
 	// 两阶段架构
 	phase              int
 	understanding      string
@@ -219,15 +222,16 @@ type CommitResult struct {
 func (c *Client) StartCommitSession(diffContent, description string, conventionInfo git.ConventionInfo, maxRetries int, selectedFiles []string) (*CommitSession, error) {
 	scopeHints := inferScopeHints(selectedFiles)
 
-	// Phase 1: understand
-	systemPrompt := buildUnderstandSystemPrompt(conventionInfo)
+	memoryContent, _ := memory.Read()
+
+	systemPrompt := buildUnderstandSystemPrompt(conventionInfo, memoryContent)
 	userPrompt := buildUnderstandUserPrompt(diffContent, description)
 
 	estimatedTokens := estimateTokenCount(systemPrompt + userPrompt)
 	compactMode := estimatedTokens > 6000
 
 	if compactMode {
-		systemPrompt = buildUnderstandSystemPromptCompact(conventionInfo)
+		systemPrompt = buildUnderstandSystemPromptCompact(conventionInfo, memoryContent)
 		userPrompt = buildUnderstandUserPromptCompact(diffContent)
 	}
 
@@ -236,28 +240,28 @@ func (c *Client) StartCommitSession(diffContent, description string, conventionI
 		{Role: openai.ChatMessageRoleUser, Content: userPrompt},
 	}
 
-	// Pre-build Phase 2 system prompt
-	phase2Prompt := buildAuthSystemPrompt(conventionInfo, scopeHints)
+	phase2Prompt := buildAuthSystemPrompt(conventionInfo, scopeHints, memoryContent)
 	if compactMode {
-		phase2Prompt = buildAuthSystemPromptCompact(conventionInfo, scopeHints)
+		phase2Prompt = buildAuthSystemPromptCompact(conventionInfo, scopeHints, memoryContent)
 	}
 
 	sess := &CommitSession{
-		client:             c,
-		messages:           messages,
-		tools:              buildOpenAITools(),
-		maxRetries:         maxRetries,
-		maxLoops:           100,
-		maxReadFileCalls:   dynReadFileLimit(len(selectedFiles)),
-		maxListTreeCalls:   envIntOrDefault("GIT_AI_MAX_LIST_TREE_CALLS", 1),
-		compactMode:        compactMode,
-		toolCache:          make(map[string]string),
-		readFiles:          make(map[string]bool),
-		phase:              PhaseUnderstand,
-		phase2SystemPrompt: phase2Prompt,
+		client:               c,
+		messages:             messages,
+		tools:                buildOpenAITools(),
+		maxRetries:           maxRetries,
+		maxLoops:             100,
+		maxReadFileCalls:     dynReadFileLimit(len(selectedFiles)),
+		maxListTreeCalls:     envIntOrDefault("GIT_AI_MAX_LIST_TREE_CALLS", 1),
+		maxUpdateMemoryCalls: 1,
+		compactMode:          compactMode,
+		toolCache:            make(map[string]string),
+		readFiles:            make(map[string]bool),
+		phase:                PhaseUnderstand,
+		phase2SystemPrompt:   phase2Prompt,
 	}
 
-	logger.Info("AI session started model=%s compactMode=%v selectedFiles=%d estimatedTokens=%d", c.config.Model, compactMode, len(selectedFiles), estimatedTokens)
+	logger.Info("AI session started model=%s compactMode=%v selectedFiles=%d estimatedTokens=%d memoryLen=%d", c.config.Model, compactMode, len(selectedFiles), estimatedTokens, len(memoryContent))
 	return sess, nil
 }
 
@@ -272,12 +276,13 @@ func (c *Client) ContinueCommitSession(ps *PersistableSession, diffContent strin
 		Content: continuePrompt,
 	})
 
+	memoryContent, _ := memory.Read()
+
 	scopeHints := inferScopeHints(selectedFiles)
-	systemPrompt := buildAuthSystemPrompt(conventionInfo, scopeHints)
+	systemPrompt := buildAuthSystemPrompt(conventionInfo, scopeHints, memoryContent)
 	if ps.CompactMode {
-		systemPrompt = buildAuthSystemPromptCompact(conventionInfo, scopeHints)
+		systemPrompt = buildAuthSystemPromptCompact(conventionInfo, scopeHints, memoryContent)
 	}
-	// Replace the first message (system prompt) with updated one
 	if len(messages) > 0 && messages[0].Role == openai.ChatMessageRoleSystem {
 		messages[0].Content = systemPrompt
 	} else {
@@ -285,17 +290,18 @@ func (c *Client) ContinueCommitSession(ps *PersistableSession, diffContent strin
 	}
 
 	sess := &CommitSession{
-		client:           c,
-		messages:         messages,
-		tools:            buildOpenAITools(),
-		maxRetries:       3,
-		maxLoops:         100,
-		maxReadFileCalls: dynReadFileLimit(len(selectedFiles)),
-		maxListTreeCalls: envIntOrDefault("GIT_AI_MAX_LIST_TREE_CALLS", 1),
-		compactMode:      ps.CompactMode,
-		toolCache:        make(map[string]string),
-		readFiles:        make(map[string]bool),
-		phase:            PhaseCommit,
+		client:               c,
+		messages:             messages,
+		tools:                buildOpenAITools(),
+		maxRetries:           3,
+		maxLoops:             100,
+		maxReadFileCalls:     dynReadFileLimit(len(selectedFiles)),
+		maxListTreeCalls:     envIntOrDefault("GIT_AI_MAX_LIST_TREE_CALLS", 1),
+		maxUpdateMemoryCalls: 1,
+		compactMode:          ps.CompactMode,
+		toolCache:            make(map[string]string),
+		readFiles:            make(map[string]bool),
+		phase:                PhaseCommit,
 	}
 
 	return sess, nil
@@ -865,6 +871,43 @@ func executeToolCall(name, argsJSON string) string {
 		}
 		return result
 
+	case "update_memory":
+		var args struct {
+			Content string `json:"content"`
+			Action  string `json:"action"`
+		}
+		if err := json.Unmarshal(json.RawMessage(argsJSON), &args); err != nil {
+			return fmt.Sprintf("ERROR: 解析参数失败：%v", err)
+		}
+		if args.Content == "" {
+			return "ERROR: content 不能为空"
+		}
+		if args.Action != "append" && args.Action != "replace" {
+			return fmt.Sprintf("ERROR: action 必须是 append 或 replace，当前值: %s", args.Action)
+		}
+
+		var finalContent string
+		if args.Action == "append" {
+			existing, err := memory.Read()
+			if err != nil {
+				logger.Warn("读取现有记忆失败: %v", err)
+				finalContent = args.Content
+			} else if existing != "" {
+				finalContent = existing + "\n\n---\n\n" + args.Content
+			} else {
+				finalContent = args.Content
+			}
+		} else {
+			finalContent = args.Content
+		}
+
+		if err := memory.Write(finalContent); err != nil {
+			logger.Error("写入记忆失败: %v", err)
+			return fmt.Sprintf("ERROR: 写入记忆失败：%v", err)
+		}
+		logger.Info("记忆已更新 action=%s length=%d", args.Action, len(finalContent))
+		return fmt.Sprintf("MEMORY_UPDATED: 项目记忆已%s，当前长度 %d 字符", args.Action, len(finalContent))
+
 	default:
 		return fmt.Sprintf("ERROR: 未知工具 %s", name)
 	}
@@ -913,6 +956,14 @@ func (s *CommitSession) executeToolCallWithLimit(name, argsJSON string) string {
 			return fmt.Sprintf("SKIPPED: read_file 调用已达上限（%d）", s.maxReadFileCalls)
 		}
 		s.readFileCalls++
+		s.mu.Unlock()
+	case "update_memory":
+		s.mu.Lock()
+		if s.updateMemoryCalls >= s.maxUpdateMemoryCalls {
+			s.mu.Unlock()
+			return fmt.Sprintf("SKIPPED: update_memory 调用已达上限（%d），每次会话最多更新 1 次", s.maxUpdateMemoryCalls)
+		}
+		s.updateMemoryCalls++
 		s.mu.Unlock()
 	}
 
@@ -1110,11 +1161,17 @@ func buildGeneratePrompt(diffContent, description string) string {
 }
 
 // buildAuthSystemPrompt 构建 Phase 2（审查提交阶段）系统提示词
-func buildAuthSystemPrompt(conventionInfo git.ConventionInfo, scopeHints []string) string {
+func buildAuthSystemPrompt(conventionInfo git.ConventionInfo, scopeHints []string, memoryContent string) string {
 	var b strings.Builder
 	b.WriteString("你是资深代码审查助手。工作流程：审查风险 → report_review → 提交。\n\n")
 	b.WriteString("你已在理解阶段阅读了代码，当前对话中已包含对变更的结构化理解。\n")
 	b.WriteString("如需补充阅读特定代码，仍可使用 read_file。\n\n")
+
+	if memoryContent != "" {
+		b.WriteString("【项目记忆】（历史积累的项目知识，帮助你更好地审查代码）\n")
+		b.WriteString(truncate(memoryContent, 800))
+		b.WriteString("\n\n")
+	}
 
 	b.WriteString("【核心原则】\n")
 	b.WriteString("1. 读代码，再做判断：严禁仅凭文件名或 diff 摘要推断风险。必须 read_file 读取具体代码后再分析。\n")
@@ -1188,6 +1245,7 @@ func buildAuthSystemPrompt(conventionInfo git.ConventionInfo, scopeHints []strin
 	b.WriteString("- report_review 必须在 git_commit 之前调用\n")
 	b.WriteString("- git_commit 是最终目标，失败用 amend 修正，最多 3 次\n")
 	b.WriteString("- 不可恢复错误时不重试\n")
+	b.WriteString("- 如果发现项目的重要架构模式、团队约定或易错点，可调用 update_memory 记录（每次会话最多 1 次）\n")
 	b.WriteString("- 提交后输出：\n")
 	b.WriteString("【最终提交信息】\n")
 	b.WriteString("```commit\n")
@@ -1197,10 +1255,15 @@ func buildAuthSystemPrompt(conventionInfo git.ConventionInfo, scopeHints []strin
 	return b.String()
 }
 
-func buildAuthSystemPromptCompact(conventionInfo git.ConventionInfo, scopeHints []string) string {
+func buildAuthSystemPromptCompact(conventionInfo git.ConventionInfo, scopeHints []string, memoryContent string) string {
 	var b strings.Builder
 	b.WriteString("你是代码审查助手。工作流程：审查风险 → report_review → 提交。\n")
 	b.WriteString("已在理解阶段阅读了代码，直接进入审查和提交。\n")
+
+	if memoryContent != "" {
+		b.WriteString("项目记忆: " + truncate(memoryContent, 400) + "\n")
+	}
+
 	b.WriteString("审查维度：正确性、安全性、性能、错误处理、设计、测试、可维护性、一致性\n")
 	b.WriteString("简单变更（注释/单行修复/配置微调）可设 is_simple=true 跳过详细审查。\n")
 	b.WriteString("先读代码再判断，commit message 描述变更本身不是审查结论。\n")
@@ -1217,7 +1280,7 @@ func buildAuthSystemPromptCompact(conventionInfo git.ConventionInfo, scopeHints 
 		b.WriteString("规范:\n" + truncate(conventionInfo.AllConventionTools, 300) + "\n")
 	}
 
-	b.WriteString("规则: 读代码再判断; report_review 在 git_commit 前; commit 描述变更本身; git_commit 是目标; 失败用 amend\n")
+	b.WriteString("规则: 读代码再判断; report_review 在 git_commit 前; commit 描述变更本身; git_commit 是目标; 失败用 amend; 发现重要模式可 update_memory(最多1次)\n")
 
 	return b.String()
 }
@@ -1225,10 +1288,16 @@ func buildAuthSystemPromptCompact(conventionInfo git.ConventionInfo, scopeHints 
 // ---- Phase 1 提示词 ----
 
 // buildUnderstandSystemPrompt 构建 Phase 1（理解阶段）系统提示词
-func buildUnderstandSystemPrompt(conventionInfo git.ConventionInfo) string {
+func buildUnderstandSystemPrompt(conventionInfo git.ConventionInfo, memoryContent string) string {
 	var b strings.Builder
 	b.WriteString("你是资深代码审查助手。当前阶段：【理解变更】。\n\n")
 	b.WriteString("你的任务是阅读并理解代码变更，然后调用 summarize_changes 提交结构化理解。\n\n")
+
+	if memoryContent != "" {
+		b.WriteString("【项目记忆】（历史积累的项目知识，帮助你更好地理解上下文）\n")
+		b.WriteString(truncate(memoryContent, 800))
+		b.WriteString("\n\n")
+	}
 
 	b.WriteString("【大变更集处理策略】\n")
 	b.WriteString("- diff 开头可能包含「变更文件分组（按目录）」索引，按目录列出所有变更文件及数量\n")
@@ -1290,9 +1359,14 @@ func buildUnderstandUserPrompt(diffContent, description string) string {
 }
 
 // buildUnderstandSystemPromptCompact Phase 1 紧凑版系统提示词
-func buildUnderstandSystemPromptCompact(conventionInfo git.ConventionInfo) string {
+func buildUnderstandSystemPromptCompact(conventionInfo git.ConventionInfo, memoryContent string) string {
 	var b strings.Builder
 	b.WriteString("当前阶段：【理解变更】。阅读代码理解变更后调用 summarize_changes。\n\n")
+
+	if memoryContent != "" {
+		b.WriteString("项目记忆: " + truncate(memoryContent, 400) + "\n\n")
+	}
+
 	b.WriteString("大变更集: 先看开头的文件分组索引了解全貌, 优先读 core 文件, 跳过 test/config。\n")
 	b.WriteString("步骤: diff_overview → read_file → 输出理解 → summarize_changes\n")
 	b.WriteString("不要审查风险，不要提交。理解够了就调用 summarize_changes。\n")
