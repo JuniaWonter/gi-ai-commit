@@ -36,12 +36,6 @@ type (
 		pending []ai.PendingToolCall
 		err     error
 	}
-	stageDoneMsg struct {
-		success     bool
-		err         error
-		diffContent string
-		diffMode    string
-	}
 )
 
 // CommitFlowOptions configures the commit flow.
@@ -88,13 +82,8 @@ type CommitFlowModel struct {
 	termWidth  int
 	termHeight int
 
-	// Stage state
-	selectedFiles   []string
-	stagedFiles     []string
-	originalStaged  []string
-	stagedDiff      string
-	stagedDiffMode  string
-	stageInProgress bool
+	// File selection
+	selectedFiles []string
 
 	// AI session
 	session      *ai.CommitSession
@@ -150,7 +139,7 @@ func (m *CommitFlowModel) Init() tea.Cmd {
 	}
 	if m.phase == phaseStreaming {
 		m.header.PhaseLabel = "AI 分析"
-		return m.startStageCmd(m.selectedFiles)
+		return m.startGenerateCmd()
 	}
 	return nil
 }
@@ -175,9 +164,6 @@ func (m *CommitFlowModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 
 	case filePanelMsg:
 		return m.handleFilePanelMsg(msg)
-
-	case stageDoneMsg:
-		return m.handleStageDone(msg)
 
 	case streamChunkMsg:
 		return m.handleStreamChunk(msg)
@@ -229,7 +215,7 @@ func (m *CommitFlowModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 func (m *CommitFlowModel) switchToStreaming() {
 	m.phase = phaseStreaming
 	m.header.PhaseLabel = "AI 分析"
-	m.header.DiffMode = m.stagedDiffMode
+	m.header.DiffMode = ""
 	m.header.FileCount = len(m.files)
 	m.header.SelectedCnt = len(m.selectedFiles)
 }
@@ -261,31 +247,10 @@ func (m *CommitFlowModel) handleFilePanelMsg(msg filePanelMsg) (tea.Model, tea.C
 		return m, tea.Quit
 	}
 	m.selectedFiles = msg.selectedFiles
-	m.stageInProgress = true
 	m.switchToStreaming()
 	return m, tea.Batch(
-		m.startStageCmd(msg.selectedFiles),
+		m.startGenerateCmd(),
 	)
-}
-
-func (m *CommitFlowModel) handleStageDone(msg stageDoneMsg) (tea.Model, tea.Cmd) {
-	m.stageInProgress = false
-	if !msg.success {
-		logger.Warn("stage 失败: %v", msg.err)
-		m.errorReason = "stage_failed"
-		m.switchToDone()
-		return m, nil
-	}
-	m.header.SelectedCnt = len(m.selectedFiles)
-	m.stagedDiff = msg.diffContent
-	m.stagedDiffMode = msg.diffMode
-	debug.Logf("stage done mode=%s bytes=%d", msg.diffMode, len(msg.diffContent))
-
-	// Create streaming panel with stored window dimensions
-	sp := NewStreamingPanel(msg.diffMode)
-	sp.SetViewportSize(m.termWidth, m.termHeight-2)
-	m.panel = sp
-	return m, m.startGenerateCmd()
 }
 
 func (m *CommitFlowModel) handleStreamChunk(msg streamChunkMsg) (tea.Model, tea.Cmd) {
@@ -518,7 +483,7 @@ func (m *CommitFlowModel) handleAskUserDone(msg askUserDoneMsg) (tea.Model, tea.
 		sp.AppendOutput(fmt.Sprintf("→ 用户回答: %s", answer))
 		sp.Reset()
 	} else {
-		sp := NewStreamingPanel(m.stagedDiffMode)
+		sp := NewStreamingPanel("")
 		sp.SetViewportSize(m.termWidth, m.termHeight-2)
 		m.panel = sp
 		sp.AppendOutput(fmt.Sprintf("→ 用户回答: %s", answer))
@@ -551,44 +516,22 @@ func (m *CommitFlowModel) handleAskUserDone(msg askUserDoneMsg) (tea.Model, tea.
 
 // --- Commands ---
 
-func (m *CommitFlowModel) startStageCmd(files []string) tea.Cmd {
-	return func() tea.Msg {
-		debug.Logf("staging files=%v", files)
-		originalStaged := getStagedFiles()
-		if err := diff.StageFiles(files); err != nil {
-			logger.Error("stage 文件失败: %v", err)
-			debug.Logf("stage failed err=%v", err)
-			return stageDoneMsg{success: false, err: err}
-		}
-		m.stagedFiles = files
-		m.originalStaged = originalStaged
-
-		processor := diff.NewDiffProcessor(m.opts.DiffCfg, m.opts.GitRoot)
-		payloads, err := processor.BuildPayloadsForFiles(files)
-		if err != nil || len(payloads) == 0 {
-			logger.Error("构建 diff payload 失败: err=%v count=%d", err, len(payloads))
-			debug.Logf("payload build failed err=%v count=%d", err, len(payloads))
-			return stageDoneMsg{success: false, err: fmt.Errorf("获取 staged diff 失败: %w", err)}
-		}
-		return stageDoneMsg{
-			success:     true,
-			diffContent: payloads[0].Content,
-			diffMode:    payloads[0].Mode,
-		}
-	}
-}
-
 func (m *CommitFlowModel) startGenerateCmd() tea.Cmd {
 	conventionInfo := git.DetectConventions()
-	debug.Logf("starting AI session diffMode=%s bytes=%d", m.stagedDiffMode, len(m.stagedDiff))
-	logger.Info("starting AI session diffMode=%s bytes=%d continue=%v", m.stagedDiffMode, len(m.stagedDiff), m.continueSess != nil)
+	debug.Logf("starting AI session files=%d", len(m.selectedFiles))
+	logger.Info("starting AI session files=%d continue=%v", len(m.selectedFiles), m.continueSess != nil)
+
+	// Create streaming panel
+	sp := NewStreamingPanel("")
+	sp.SetViewportSize(m.termWidth, m.termHeight-2)
+	m.panel = sp
 
 	var sess *ai.CommitSession
 	var err error
 	if m.continueSess != nil {
-		sess, err = m.opts.Client.ContinueCommitSession(m.continueSess, m.stagedDiff, conventionInfo, m.selectedFiles, m.opts.SkillManager)
+		sess, err = m.opts.Client.ContinueCommitSession(m.continueSess, conventionInfo, m.selectedFiles, m.opts.SkillManager)
 	} else {
-		sess, err = m.opts.Client.StartCommitSession(m.stagedDiff, m.opts.DescFunc(), conventionInfo, 3, m.selectedFiles, m.opts.SkillManager)
+		sess, err = m.opts.Client.StartCommitSession(m.opts.DescFunc(), conventionInfo, 3, m.selectedFiles, m.opts.SkillManager)
 	}
 	if err != nil {
 		logger.Error("创建 AI session 失败: %v", err)

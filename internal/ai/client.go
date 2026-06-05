@@ -276,22 +276,22 @@ type CommitResult struct {
 }
 
 // StartCommitSession 启动 ReAct Agent 提交会话。
-// AI 可以自由使用所有工具，通过 ReAct 循环完成：理解变更 → 审查风险 → 提交代码。
+// AI 可以自由使用所有工具，通过 ReAct 循环完成：暂存文件 → 理解变更 → 审查风险 → 提交代码。
 // 工具错误会反馈给 AI，由 AI 决定如何处理，直到成功提交或达到终止条件。
-func (c *Client) StartCommitSession(diffContent, description string, conventionInfo git.ConventionInfo, maxRetries int, selectedFiles []string, skillMgr *skill.Manager) (*CommitSession, error) {
+func (c *Client) StartCommitSession(description string, conventionInfo git.ConventionInfo, maxRetries int, selectedFiles []string, skillMgr *skill.Manager) (*CommitSession, error) {
 	scopeHints := inferScopeHints(selectedFiles)
 
 	memoryContent, _ := memory.Read()
 
 	systemPrompt := buildReActSystemPrompt(conventionInfo, scopeHints, memoryContent, skillMgr)
-	userPrompt := buildReActUserPrompt(diffContent, description)
+	userPrompt := buildReActUserPrompt(selectedFiles, description)
 
 	estimatedTokens := estimateTokenCount(systemPrompt + userPrompt)
 	compactMode := estimatedTokens > 6000
 
 	if compactMode {
 		systemPrompt = buildReActSystemPromptCompact(conventionInfo, scopeHints, memoryContent, skillMgr)
-		userPrompt = buildReActUserPromptCompact(diffContent)
+		userPrompt = buildReActUserPromptCompact(selectedFiles)
 	}
 
 	messages := []openai.ChatCompletionMessage{
@@ -326,11 +326,11 @@ func (c *Client) StartCommitSession(diffContent, description string, conventionI
 }
 
 // ContinueCommitSession 从持久化会话继续，使用 ReAct 模式继续审查提交。
-func (c *Client) ContinueCommitSession(ps *PersistableSession, diffContent string, conventionInfo git.ConventionInfo, selectedFiles []string, skillMgr *skill.Manager) (*CommitSession, error) {
+func (c *Client) ContinueCommitSession(ps *PersistableSession, conventionInfo git.ConventionInfo, selectedFiles []string, skillMgr *skill.Manager) (*CommitSession, error) {
 	messages := make([]openai.ChatCompletionMessage, len(ps.Messages))
 	copy(messages, ps.Messages)
 
-	continuePrompt := BuildContinuePrompt(diffContent)
+	continuePrompt := BuildContinuePrompt(selectedFiles)
 	messages = append(messages, openai.ChatCompletionMessage{
 		Role:    openai.ChatMessageRoleUser,
 		Content: continuePrompt,
@@ -395,11 +395,11 @@ func (s *CommitSession) StreamAI(send func(chunk StreamChunk)) ([]PendingToolCal
 			if msg.Role == openai.ChatMessageRoleAssistant {
 				hasReasoning := msg.ReasoningContent != ""
 				hasToolCalls := len(msg.ToolCalls) > 0
-				logger.Debug("Message[%d] assistant: content=%d chars, reasoning=%v (%d chars), tool_calls=%v (%d)", 
+				logger.Debug("Message[%d] assistant: content=%d chars, reasoning=%v (%d chars), tool_calls=%v (%d)",
 					i, len(msg.Content), hasReasoning, len(msg.ReasoningContent), hasToolCalls, len(msg.ToolCalls))
 			}
 		}
-		
+
 		// Log the actual JSON being sent (first 2000 chars)
 		if jsonBytes, err := json.Marshal(req); err == nil {
 			jsonStr := string(jsonBytes)
@@ -498,7 +498,7 @@ func (s *CommitSession) StreamAI(send func(chunk StreamChunk)) ([]PendingToolCal
 	s.streaming = false
 
 	// Log what the AI returned
-	logger.Debug("AI response: content=%d chars, tool_calls=%d, finish_reason=%s", 
+	logger.Debug("AI response: content=%d chars, tool_calls=%d, finish_reason=%s",
 		len(fullContent.String()), len(toolCalls), finishReason)
 	if len(toolCalls) > 0 {
 		for i, tc := range toolCalls {
@@ -603,15 +603,15 @@ func (s *CommitSession) ExecuteAndResume(pending []PendingToolCall, authorized [
 }
 
 func (s *CommitSession) ExecuteAndResumeWithStream(pending []PendingToolCall, authorized []bool, send func(chunk StreamChunk)) ([]PendingToolCall, error) {
-	logger.Debug("ExecuteAndResumeWithStream: loop=%d/%d, retry=%d/%d, tools=%d", 
+	logger.Debug("ExecuteAndResumeWithStream: loop=%d/%d, retry=%d/%d, tools=%d",
 		s.loopCount, s.maxLoops, s.retryCount, s.maxRetries, len(pending))
-	
+
 	// Check session timeout
 	if time.Since(s.startTime) > s.maxDuration {
 		logger.Warn("会话超时: duration=%v 超过 maxDuration=%v", time.Since(s.startTime), s.maxDuration)
 		return nil, fmt.Errorf("会话超时（%v），请重试", s.maxDuration)
 	}
-	
+
 	if s.loopCount > s.maxLoops {
 		logger.Warn("AI 陷入循环: loopCount=%d 超过 maxLoops=%d", s.loopCount, s.maxLoops)
 		return nil, fmt.Errorf("AI 陷入循环（%d 次工具调用），请手动处理", s.loopCount)
@@ -1038,7 +1038,7 @@ func executeToolCall(name, argsJSON string) string {
 		if err := json.Unmarshal(json.RawMessage(argsJSON), &args); err != nil {
 			return fmt.Sprintf("ERROR: 解析参数失败：%v", err)
 		}
-		
+
 		var result strings.Builder
 		if args.IsSimple {
 			result.WriteString("REVIEW_RESULT:\n摘要: ")
@@ -1050,7 +1050,7 @@ func executeToolCall(name, argsJSON string) string {
 			result.WriteString("\n建议: ")
 			result.WriteString(args.Recommendation)
 			result.WriteString("\n风险: ")
-			
+
 			if args.HasRisk && len(args.Risks) > 0 {
 				for i, r := range args.Risks {
 					sev, _ := r["severity"].(string)
@@ -1058,7 +1058,7 @@ func executeToolCall(name, argsJSON string) string {
 					desc, _ := r["description"].(string)
 					file, _ := r["file"].(string)
 					sug, _ := r["suggestion"].(string)
-					
+
 					fmt.Fprintf(&result, "\n  [%d] [%s/%s]", i+1, sev, cat)
 					if file != "" {
 						result.WriteString(" ")
@@ -1597,7 +1597,7 @@ func buildAuthSystemPrompt(conventionInfo git.ConventionInfo, scopeHints []strin
 	b.WriteString("scope: 可选\n")
 	b.WriteString("subject: 中文，具体描述代码变更内容，**至少 20 个字符**\n")
 	b.WriteString("破坏性变更: type!: 或 BREAKING CHANGE:\n\n")
-	
+
 	b.WriteString("【Commit Message 质量要求】\n")
 	b.WriteString("❌ 禁止使用泛化、无意义的 subject，例如：\n")
 	b.WriteString("   - chore: 提交变更\n")
@@ -1912,7 +1912,7 @@ func buildReActSystemPrompt(conventionInfo git.ConventionInfo, scopeHints []stri
 	b.WriteString("scope: 可选\n")
 	b.WriteString("subject: 中文，具体描述代码变更内容，**至少 20 个字符**\n")
 	b.WriteString("破坏性变更: type!: 或 BREAKING CHANGE:\n\n")
-	
+
 	b.WriteString("【Commit Message 质量要求】\n")
 	b.WriteString("❌ 禁止使用泛化、无意义的 subject，例如：\n")
 	b.WriteString("   - chore: 提交变更\n")
@@ -2039,7 +2039,7 @@ func buildReActSystemPromptCompact(conventionInfo git.ConventionInfo, scopeHints
 }
 
 // buildReActUserPrompt 构建 ReAct 模式用户提示词
-func buildReActUserPrompt(diffContent, description string) string {
+func buildReActUserPrompt(selectedFiles []string, description string) string {
 	var b strings.Builder
 
 	if description != "" {
@@ -2048,27 +2048,39 @@ func buildReActUserPrompt(diffContent, description string) string {
 		b.WriteString("\n\n")
 	}
 
-	b.WriteString("代码变更：\n")
-	truncatedDiff := truncate(diffContent, 8000)
-	b.WriteString(truncatedDiff)
-	b.WriteString("\n\n")
+	b.WriteString("用户选择了以下文件准备提交：\n")
+	for _, f := range selectedFiles {
+		b.WriteString("- ")
+		b.WriteString(f)
+		b.WriteString("\n")
+	}
+	b.WriteString("\n")
 
-	b.WriteString("请分析这些变更，审查风险，并生成合适的 commit message 提交。\n")
-	b.WriteString("使用 ReAct 模式：思考 → 行动（调用工具）→ 观察结果 → 继续思考，直到完成提交。\n")
+	b.WriteString("请按以下步骤完成提交：\n")
+	b.WriteString("1. 使用 git_add 暂存这些文件\n")
+	b.WriteString("2. 使用 diff_overview 查看变更概览\n")
+	b.WriteString("3. 必要时使用 read_file 深入阅读关键代码\n")
+	b.WriteString("4. 使用 report_review 输出审查意见\n")
+	b.WriteString("5. 使用 ask_user 确认 commit message\n")
+	b.WriteString("6. 使用 git_commit 提交\n")
+	b.WriteString("\n使用 ReAct 模式：思考 → 行动（调用工具）→ 观察结果 → 继续思考，直到完成提交。\n")
 
 	return b.String()
 }
 
 // buildReActUserPromptCompact ReAct 模式紧凑版用户提示词
-func buildReActUserPromptCompact(diffContent string) string {
+func buildReActUserPromptCompact(selectedFiles []string) string {
 	var b strings.Builder
 
-	b.WriteString("代码变更：\n")
-	truncatedDiff := truncateCompact(diffContent, 4000)
-	b.WriteString(truncatedDiff)
-	b.WriteString("\n\n")
+	b.WriteString("用户选择的文件：\n")
+	for _, f := range selectedFiles {
+		b.WriteString("- ")
+		b.WriteString(f)
+		b.WriteString("\n")
+	}
+	b.WriteString("\n")
 
-	b.WriteString("步骤: 分析风险 → read_file(需要时) → report_review → ask_user 确认 → git_commit\n")
+	b.WriteString("步骤: git_add 暂存 → diff_overview 查看变更 → read_file(需要时) → report_review → ask_user 确认 → git_commit\n")
 
 	return b.String()
 }
@@ -2484,9 +2496,9 @@ func validateCommitMessage(message string) error {
 	if len(lines) == 0 {
 		return fmt.Errorf("commit message 不能为空")
 	}
-	
+
 	subject := strings.TrimSpace(lines[0])
-	
+
 	// Parse the subject to extract type, scope, and description
 	// Format: type(scope): description or type: description
 	var description string
@@ -2495,14 +2507,14 @@ func validateCommitMessage(message string) error {
 	} else {
 		description = subject
 	}
-	
+
 	// Check minimum length (at least 20 Chinese characters or equivalent)
 	// Count actual characters (not bytes)
 	charCount := len([]rune(description))
 	if charCount < 20 {
 		return fmt.Errorf("subject 描述太短（%d 个字符），需要至少 20 个字符来具体描述变更内容", charCount)
 	}
-	
+
 	// Check for generic/meaningless subjects
 	genericPatterns := []string{
 		"提交变更",
@@ -2524,14 +2536,14 @@ func validateCommitMessage(message string) error {
 		"改进代码",
 		"清理代码",
 	}
-	
+
 	descriptionLower := strings.ToLower(description)
 	for _, pattern := range genericPatterns {
 		if strings.Contains(descriptionLower, pattern) {
 			return fmt.Errorf("subject 包含泛化表述「%s」，需要具体描述改了什么内容（例如：添加了哪个功能、修复了哪个 bug）", pattern)
 		}
 	}
-	
+
 	return nil
 }
 

@@ -200,16 +200,21 @@ func compressMessagesForSave(messages []openai.ChatCompletionMessage) []openai.C
 }
 
 // BuildContinuePrompt 构建继续会话的用户提示词
-func BuildContinuePrompt(newDiffContent string) string {
+func BuildContinuePrompt(selectedFiles []string) string {
 	var b strings.Builder
 	b.WriteString("这是同一功能的后续变更。请基于你对代码库已有的理解，继续审查并提交。\n")
 	b.WriteString("注意：之前已提交的变更不需要重复考虑，只关注本次新增的变更。\n\n")
-	b.WriteString("新的代码变更：\n")
-	b.WriteString(newDiffContent)
-	b.WriteString("\n\n执行步骤：\n")
-	b.WriteString("1. diff_overview → 了解本次新增变更\n")
-	b.WriteString("2. read_file → 如有需要读取新变更代码\n")
-	b.WriteString("3. report_review → 输出结构化审查结果\n")
-	b.WriteString("4. git_commit → 提交\n")
+	b.WriteString("用户选择了以下文件准备提交：\n")
+	for _, f := range selectedFiles {
+		b.WriteString("- ")
+		b.WriteString(f)
+		b.WriteString("\n")
+	}
+	b.WriteString("\n执行步骤：\n")
+	b.WriteString("1. git_add → 暂存这些文件\n")
+	b.WriteString("2. diff_overview → 了解本次新增变更\n")
+	b.WriteString("3. read_file → 如有需要读取新变更代码\n")
+	b.WriteString("4. report_review → 输出结构化审查结果\n")
+	b.WriteString("5. git_commit → 提交\n")
 	return b.String()
 }
