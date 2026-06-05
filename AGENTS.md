@@ -25,8 +25,14 @@ go test -v ./internal/diff/ -run TestParseNumStat
 - `internal/git/` - Git operations (commit, diff, files, search, tools)
 - `internal/diff/` - Three-tier diff degradation (full → compact → file-level)
 - `internal/config/` - YAML config with env var overrides (`AI_API_KEY`, `AI_MODEL`, `AI_BASE_URL`)
+- `internal/skill/` - Skill system (MCP-based extensible tool plugins)
+- `internal/mcp/` - MCP (Model Context Protocol) client for external tool servers
+- `internal/memory/` - Project memory persistence (`.git/ai-memory`)
+- `internal/logger/` - Structured logging to `~/.config/ai-commit/logs/`
 
-**AI tool flow**: User selects files → stage → AI calls tools (`diff_overview`, `read_file`, `report_review`, `git_commit`) → commit → verify
+**AI tool flow**: User selects files → stage → AI calls tools freely (diff_overview, read_file, git_status, git_log, report_review, ask_user, git_commit, etc.) → commit → verify
+
+**Git as a tool**: AI has free access to all Git operations (status/log/branch/stash/add/restore/diff/blame/tag). No rigid execution order. AI uses `ask_user` to confirm commit message before calling `git_commit`.
 
 ## Critical patterns
 
@@ -48,7 +54,7 @@ go test -v ./internal/diff/ -run TestParseNumStat
 - **Spinner.Update** must run in Panel.Update() default branch, else spinner stops
 - **StreamActor.Run()** returns `tea.Cmd` (uses `NextMsgCmd`), not `tea.Msg`
 - **contentH** must clamp to ≥1 after subtraction
-- **Overlay** is a bottom confirmation bar, not a screen overlay (replaces FooterBar)
+- **Overlay** is a bottom confirmation bar, not a screen overlay (replaces FooterBar). Only used for `summarize_changes` phase transition; git_commit uses `ask_user` tool instead
 - **renderMarkdown** needs `Width()` set on all lines for wrapping
 - **Viewport sizing**: `SetViewportSize` must be called once after Panel creation; `WindowSizeMsg` must forward to Panel on resize
 

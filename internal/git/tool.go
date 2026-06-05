@@ -229,8 +229,161 @@ var ToolDefinitions = []ToolDefinition{
 		}`),
 	},
 	{
+		Name:        "git_status",
+		Description: "获取工作区状态（git status --short）。显示暂存区、工作区和未跟踪文件的状态。自动执行，无需授权。",
+		Parameters: json.RawMessage(`{
+			"type": "object",
+			"properties": {}
+		}`),
+	},
+	{
+		Name:        "git_log",
+		Description: "获取最近的提交历史（git log）。可查看提交哈希、作者、日期和提交信息。自动执行，无需授权。",
+		Parameters: json.RawMessage(`{
+			"type": "object",
+			"properties": {
+				"count": {
+					"type": "number",
+					"description": "返回的提交数量（默认 10，最大 50）"
+				},
+				"oneline": {
+					"type": "boolean",
+					"description": "是否使用单行格式（默认 true）"
+				}
+			}
+		}`),
+	},
+	{
+		Name:        "git_branch",
+		Description: "获取分支信息（git branch）。显示当前分支和所有本地分支。自动执行，无需授权。",
+		Parameters: json.RawMessage(`{
+			"type": "object",
+			"properties": {
+				"all": {
+					"type": "boolean",
+					"description": "是否包含远程分支（默认 false）"
+				}
+			}
+		}`),
+	},
+	{
+		Name:        "git_diff_unstaged",
+		Description: "获取未暂存的变更（git diff）。显示工作区中未 add 的修改内容。自动执行，无需授权。",
+		Parameters: json.RawMessage(`{
+			"type": "object",
+			"properties": {
+				"path": {
+					"type": "string",
+					"description": "可选，限定查看指定文件的未暂存变更"
+				}
+			}
+		}`),
+	},
+	{
+		Name:        "git_add",
+		Description: "将文件添加到暂存区（git add）。可以暂存指定文件或目录。",
+		Parameters: json.RawMessage(`{
+			"type": "object",
+			"properties": {
+				"paths": {
+					"type": "array",
+					"items": { "type": "string" },
+					"description": "要暂存的文件或目录路径列表"
+				}
+			},
+			"required": ["paths"]
+		}`),
+	},
+	{
+		Name:        "git_restore",
+		Description: "从暂存区移除文件（git restore --staged）或恢复工作区文件（git restore）。",
+		Parameters: json.RawMessage(`{
+			"type": "object",
+			"properties": {
+				"paths": {
+					"type": "array",
+					"items": { "type": "string" },
+					"description": "要操作的文件路径列表"
+				},
+				"staged": {
+					"type": "boolean",
+					"description": "true=从暂存区移除（git restore --staged），false=恢复工作区文件（git restore）"
+				}
+			},
+			"required": ["paths"]
+		}`),
+	},
+	{
+		Name:        "git_stash",
+		Description: "暂存当前工作区变更（git stash）。可以保存或恢复工作区状态。",
+		Parameters: json.RawMessage(`{
+			"type": "object",
+			"properties": {
+				"action": {
+					"type": "string",
+					"enum": ["push", "pop", "list", "drop"],
+					"description": "push=保存当前变更, pop=恢复最近一次暂存, list=列出所有暂存, drop=删除指定暂存"
+				},
+				"message": {
+					"type": "string",
+					"description": "push 时的描述信息（可选）"
+				},
+				"index": {
+					"type": "number",
+					"description": "drop 时指定要删除的暂存索引（可选，默认 0）"
+				}
+			},
+			"required": ["action"]
+		}`),
+	},
+	{
+		Name:        "git_blame",
+		Description: "获取文件的 blame 信息（git blame）。显示每一行的最后修改者和提交信息。自动执行，无需授权。",
+		Parameters: json.RawMessage(`{
+			"type": "object",
+			"properties": {
+				"path": {
+					"type": "string",
+					"description": "文件路径"
+				},
+				"start_line": {
+					"type": "number",
+					"description": "起始行号（可选）"
+				},
+				"end_line": {
+					"type": "number",
+					"description": "结束行号（可选）"
+				}
+			},
+			"required": ["path"]
+		}`),
+	},
+	{
+		Name:        "git_tag",
+		Description: "管理 Git 标签。可以列出标签或创建新标签。",
+		Parameters: json.RawMessage(`{
+			"type": "object",
+			"properties": {
+				"action": {
+					"type": "string",
+					"enum": ["list", "create"],
+					"description": "list=列出所有标签, create=创建新标签"
+				},
+				"name": {
+					"type": "string",
+					"description": "create 时的标签名称"
+				},
+				"message": {
+					"type": "string",
+					"description": "create 时的标签说明（可选，有则为 annotated tag）"
+				}
+			},
+			"required": ["action"]
+		}`),
+	},
+	{
 		Name:        "ask_user",
-		Description: "向用户提问并等待回答。当你遇到不确定的决策、需要用户选择方案、或需要用户确认某个选择时使用此工具。会弹出交互界面让用户选择或输入。",
+		Description: "向用户提问并等待回答。当你遇到不确定的决策、需要用户选择方案、或需要用户确认某个选择时使用此工具。会弹出交互界面让用户选择或输入。提交代码前建议用此工具向用户确认 commit message。",
 		Parameters: json.RawMessage(`{
 			"type": "object",
 			"properties": {

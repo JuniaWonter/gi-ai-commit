@@ -931,6 +931,128 @@ func executeToolCall(name, argsJSON string) string {
 		logger.Info("记忆已更新 action=%s length=%d", args.Action, len(finalContent))
 		return fmt.Sprintf("MEMORY_UPDATED: 项目记忆已%s，当前长度 %d 字符", args.Action, len(finalContent))
 
+	case "git_status":
+		result, err := git.GetStatus()
+		if err != nil {
+			return fmt.Sprintf("ERROR: %v", err)
+		}
+		return result
+
+	case "git_log":
+		var args struct {
+			Count   int  `json:"count"`
+			Oneline bool `json:"oneline"`
+		}
+		json.Unmarshal(json.RawMessage(argsJSON), &args)
+		if args.Count <= 0 {
+			args.Count = 10
+		}
+		result, err := git.GetLog(args.Count, args.Oneline)
+		if err != nil {
+			return fmt.Sprintf("ERROR: %v", err)
+		}
+		return result
+
+	case "git_branch":
+		var args struct {
+			All bool `json:"all"`
+		}
+		json.Unmarshal(json.RawMessage(argsJSON), &args)
+		result, err := git.GetBranch(args.All)
+		if err != nil {
+			return fmt.Sprintf("ERROR: %v", err)
+		}
+		return result
+
+	case "git_diff_unstaged":
+		var args struct {
+			Path string `json:"path"`
+		}
+		json.Unmarshal(json.RawMessage(argsJSON), &args)
+		result, err := git.GetDiffUnstaged(args.Path)
+		if err != nil {
+			return fmt.Sprintf("ERROR: %v", err)
+		}
+		return result
+
+	case "git_add":
+		var args struct {
+			Paths []string `json:"paths"`
+		}
+		if err := json.Unmarshal(json.RawMessage(argsJSON), &args); err != nil {
+			return fmt.Sprintf("ERROR: 解析参数失败：%v", err)
+		}
+		if len(args.Paths) == 0 {
+			return "ERROR: paths 不能为空"
+		}
+		result, err := git.AddFiles(args.Paths)
+		if err != nil {
+			return fmt.Sprintf("ERROR: %v", err)
+		}
+		return result
+
+	case "git_restore":
+		var args struct {
+			Paths  []string `json:"paths"`
+			Staged bool     `json:"staged"`
+		}
+		if err := json.Unmarshal(json.RawMessage(argsJSON), &args); err != nil {
+			return fmt.Sprintf("ERROR: 解析参数失败：%v", err)
+		}
+		if len(args.Paths) == 0 {
+			return "ERROR: paths 不能为空"
+		}
+		result, err := git.RestoreFiles(args.Paths, args.Staged)
+		if err != nil {
+			return fmt.Sprintf("ERROR: %v", err)
+		}
+		return result
+
+	case "git_stash":
+		var args struct {
+			Action  string `json:"action"`
+			Message string `json:"message"`
+			Index   int    `json:"index"`
+		}
+		if err := json.Unmarshal(json.RawMessage(argsJSON), &args); err != nil {
+			return fmt.Sprintf("ERROR: 解析参数失败：%v", err)
+		}
+		result, err := git.Stash(args.Action, args.Message, args.Index)
+		if err != nil {
+			return fmt.Sprintf("ERROR: %v", err)
+		}
+		return result
+
+	case "git_blame":
+		var args struct {
+			Path      string `json:"path"`
+			StartLine int    `json:"start_line"`
+			EndLine   int    `json:"end_line"`
+		}
+		if err := json.Unmarshal(json.RawMessage(argsJSON), &args); err != nil {
+			return fmt.Sprintf("ERROR: 解析参数失败：%v", err)
+		}
+		result, err := git.GetBlame(args.Path, args.StartLine, args.EndLine)
+		if err != nil {
+			return fmt.Sprintf("ERROR: %v", err)
+		}
+		return result
+
+	case "git_tag":
+		var args struct {
+			Action  string `json:"action"`
+			Name    string `json:"name"`
+			Message string `json:"message"`
+		}
+		if err := json.Unmarshal(json.RawMessage(argsJSON), &args); err != nil {
+			return fmt.Sprintf("ERROR: 解析参数失败：%v", err)
+		}
+		result, err := git.Tag(args.Action, args.Name, args.Message)
+		if err != nil {
+			return fmt.Sprintf("ERROR: %v", err)
+		}
+		return result
+
 	default:
 		return fmt.Sprintf("ERROR: 未知工具 %s", name)
 	}
@@ -1227,9 +1349,7 @@ func buildGeneratePrompt(diffContent, description string) string {
 // buildAuthSystemPrompt 构建 Phase 2（审查提交阶段）系统提示词
 func buildAuthSystemPrompt(conventionInfo git.ConventionInfo, scopeHints []string, memoryContent string, skillMgr *skill.Manager) string {
 	var b strings.Builder
-	b.WriteString("你是资深代码审查助手。工作流程：审查风险 → report_review → 提交。\n\n")
-	b.WriteString("你已在理解阶段阅读了代码，当前对话中已包含对变更的结构化理解。\n")
-	b.WriteString("如需补充阅读特定代码，仍可使用 read_file。\n\n")
+	b.WriteString("你是资深代码审查助手。你已在理解阶段阅读了代码，现在可以自由使用所有工具完成审查和提交。\n\n")
 
 	if memoryContent != "" {
 		b.WriteString("【项目记忆】（历史积累的项目知识，帮助你更好地审查代码）\n")
@@ -1241,7 +1361,8 @@ func buildAuthSystemPrompt(conventionInfo git.ConventionInfo, scopeHints []strin
 	b.WriteString("1. 读代码，再做判断：严禁仅凭文件名或 diff 摘要推断风险。必须 read_file 读取具体代码后再分析。\n")
 	b.WriteString("2. 先理解再判断：读代码后先总结「变更结构摘要」（改了哪些文件、函数、类型），再基于这个理解做审查。\n")
 	b.WriteString("3. 审查与提交分离：审查意见是给用户的辅助信息，commit message 必须基于代码变更本身生成。\n")
-	b.WriteString("4. 节约 token：每次工具调用结果都会累积在对话中。只读必要的行，不读整个文件。\n\n")
+	b.WriteString("4. 节约 token：每次工具调用结果都会累积在对话中。只读必要的行，不读整个文件。\n")
+	b.WriteString("5. 自由使用 Git：你可以自由使用所有 Git 工具（status/log/branch/stash/add/restore/diff/blame/tag）来辅助理解和操作。\n\n")
 
 	b.WriteString("【审查维度】（8 个维度，根据变更类型选择性检查）\n")
 	b.WriteString("1. 正确性 (correctness): 逻辑缺陷、边界条件、竞态条件、状态转换\n")
@@ -1258,10 +1379,23 @@ func buildAuthSystemPrompt(conventionInfo git.ConventionInfo, scopeHints []strin
 	b.WriteString("如果变更极为简单（如纯注释、单行修复、配置微调），可设置 is_simple=true 跳过详细审查。\n")
 	b.WriteString("判断标准：变更不涉及逻辑、不影响运行时行为、不改变接口。\n\n")
 
-	b.WriteString("【执行顺序】\n")
-	b.WriteString("1. 基于已有理解分析风险\n")
-	b.WriteString("2. 如有需要 read_file 补充阅读关键代码\n")
-	b.WriteString("3. 调用 report_review 输出审查意见（必须调用，在 git_commit 之前）\n")
+	b.WriteString("【Git 工具自由使用】\n")
+	b.WriteString("你可以自由使用以下 Git 工具来辅助工作：\n")
+	b.WriteString("- git_status: 查看工作区状态\n")
+	b.WriteString("- git_log: 查看提交历史\n")
+	b.WriteString("- git_branch: 查看分支信息\n")
+	b.WriteString("- git_diff_unstaged: 查看未暂存的变更\n")
+	b.WriteString("- git_add: 暂存文件\n")
+	b.WriteString("- git_restore: 取消暂存或恢复文件\n")
+	b.WriteString("- git_stash: 暂存/恢复工作区变更\n")
+	b.WriteString("- git_blame: 查看文件 blame 信息\n")
+	b.WriteString("- git_tag: 管理标签\n")
+	b.WriteString("使用场景：了解项目历史、检查分支状态、暂存不相关变更、查看代码历史等。\n\n")
+
+	b.WriteString("【提交流程】\n")
+	b.WriteString("1. 基于已有理解分析风险，必要时用 read_file 补充阅读\n")
+	b.WriteString("2. 调用 report_review 输出审查意见（建议在 git_commit 之前调用）\n")
+	b.WriteString("3. 使用 ask_user 向用户确认 commit message（展示你准备的 message，让用户确认或修改）\n")
 	b.WriteString("4. 调用 git_commit 提交（commit message 基于变更结构摘要，而非审查结论）\n")
 	b.WriteString("5. 提交成功后输出 【最终提交信息】\n\n")
 
@@ -1315,6 +1449,7 @@ func buildAuthSystemPrompt(conventionInfo git.ConventionInfo, scopeHints []strin
 	b.WriteString("- 发现潜在问题但不确定用户意图\n")
 	b.WriteString("- 需要用户确认某个设计决策\n")
 	b.WriteString("- 遇到模糊需求需要澄清\n")
+	b.WriteString("- 提交前确认 commit message（推荐）\n")
 	b.WriteString("工具会弹出交互界面让用户选择或输入，等待用户回答后继续执行。\n")
 
 	b.WriteString("\n【规则】\n")
@@ -1326,7 +1461,6 @@ func buildAuthSystemPrompt(conventionInfo git.ConventionInfo, scopeHints []strin
 	b.WriteString("- 避免在对话中混入无关的长文本，控制每轮输出长度\n")
 	b.WriteString("- tool 结果中已有内容的文件，直接引用，不要重复 read_file\n")
 	b.WriteString("- list_tree 默认 depth=1\n")
-	b.WriteString("- report_review 必须在 git_commit 之前调用\n")
 	b.WriteString("- git_commit 是最终目标，失败用 amend 修正，最多 3 次\n")
 	b.WriteString("- 不可恢复错误时不重试\n")
 	b.WriteString("- 如果发现项目的重要架构模式、团队约定或易错点，可调用 update_memory 记录（每次会话最多 1 次）\n")
@@ -1341,8 +1475,7 @@ func buildAuthSystemPrompt(conventionInfo git.ConventionInfo, scopeHints []strin
 
 func buildAuthSystemPromptCompact(conventionInfo git.ConventionInfo, scopeHints []string, memoryContent string, skillMgr *skill.Manager) string {
 	var b strings.Builder
-	b.WriteString("你是代码审查助手。工作流程：审查风险 → report_review → 提交。\n")
-	b.WriteString("已在理解阶段阅读了代码，直接进入审查和提交。\n")
+	b.WriteString("你是代码审查助手。已在理解阶段阅读了代码，现在可以自由使用所有工具完成审查和提交。\n")
 
 	if memoryContent != "" {
 		b.WriteString("项目记忆: " + truncate(memoryContent, 400) + "\n")
@@ -1352,7 +1485,8 @@ func buildAuthSystemPromptCompact(conventionInfo git.ConventionInfo, scopeHints 
 	b.WriteString("简单变更（注释/单行修复/配置微调）可设 is_simple=true 跳过详细审查。\n")
 	b.WriteString("先读代码再判断，commit message 描述变更本身不是审查结论。\n")
 	b.WriteString("diff 可能被截断，用 read_file 补全。控制输出长度节约 token。\n\n")
-	b.WriteString("步骤: 分析风险 → read_file(需要时) → report_review(必须) → git_commit\n")
+	b.WriteString("Git 工具: 可自由使用 git_status/log/branch/diff_unstaged/add/restore/stash/blame/tag\n")
+	b.WriteString("步骤: 分析风险 → read_file(需要时) → report_review(建议) → ask_user 确认 message → git_commit\n")
 	b.WriteString("Commit 格式: <type>(<scope>): <subject>\n")
 	b.WriteString("type: feat|fix|docs|style|refactor|perf|test|build|ci|chore|revert\n")
 
@@ -1368,8 +1502,8 @@ func buildAuthSystemPromptCompact(conventionInfo git.ConventionInfo, scopeHints 
 		b.WriteString("代码图工具: codegraph_search/explore/callers/callees/impact/node 可用于深入分析代码结构和调用关系\n")
 	}
 
-	b.WriteString("用户交互: 遇到不确定决策时用 ask_user 向用户提问\n")
-	b.WriteString("规则: 读代码再判断; report_review 在 git_commit 前; commit 描述变更本身; git_commit 是目标; 失败用 amend; 发现重要模式可 update_memory(最多1次)\n")
+	b.WriteString("用户交互: 遇到不确定决策或提交前用 ask_user 向用户提问确认\n")
+	b.WriteString("规则: 读代码再判断; commit 描述变更本身; git_commit 是目标; 失败用 amend; 发现重要模式可 update_memory(最多1次)\n")
 
 	return b.String()
 }

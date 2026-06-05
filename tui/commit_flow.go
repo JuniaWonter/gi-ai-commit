@@ -415,7 +415,7 @@ func (m *CommitFlowModel) requiresConfirm(pending []ai.PendingToolCall) bool {
 		return false
 	}
 	for _, tc := range pending {
-		if tc.Name == "git_commit" || tc.Name == "git_commit_amend" || tc.Name == "summarize_changes" {
+		if tc.Name == "summarize_changes" {
 			return true
 		}
 	}
@@ -597,12 +597,8 @@ func (m *CommitFlowModel) startGenerateCmd() tea.Cmd {
 func (m *CommitFlowModel) execPendingCmd(pending []ai.PendingToolCall, authorized []bool) tea.Cmd {
 	if authorized == nil {
 		authorized = make([]bool, len(pending))
-		for i, tc := range pending {
-			if tc.Name == "git_commit" || tc.Name == "git_commit_amend" {
-				authorized[i] = m.userAuthorized
-			} else {
-				authorized[i] = true
-			}
+		for i := range pending {
+			authorized[i] = true
 		}
 	}
 
