@@ -112,18 +112,18 @@ func (c *Client) Close() error {
 			// Note: goroutine above may leak, but we're shutting down anyway
 		}
 	}
-	
+
 	// Kill the process
 	if c.cmd != nil && c.cmd.Process != nil {
 		// Send SIGTERM first for graceful shutdown
 		c.cmd.Process.Signal(os.Interrupt)
-		
+
 		// Wait up to 1 second for graceful shutdown
 		done := make(chan error, 1)
 		go func() {
 			done <- c.cmd.Wait()
 		}()
-		
+
 		select {
 		case <-done:
 			// Process exited gracefully

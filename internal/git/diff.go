@@ -37,7 +37,7 @@ func GetDiffOverview() string {
 		b.WriteString("## 变更文件列表 (diff --name-status):\n")
 		b.WriteString(ns)
 		b.WriteString("\n\n")
-		
+
 		// Add file type categorization
 		b.WriteString("## 文件类型分析:\n")
 		categorizeFiles(ns, &b)
@@ -54,22 +54,22 @@ func GetDiffOverview() string {
 // categorizeFiles analyzes changed files and categorizes them by type
 func categorizeFiles(nameStatus string, b *strings.Builder) {
 	lines := strings.Split(strings.TrimSpace(nameStatus), "\n")
-	
+
 	var coreFiles, testFiles, configFiles, generatedFiles, docFiles []string
-	
+
 	for _, line := range lines {
 		parts := strings.Fields(line)
 		if len(parts) < 2 {
 			continue
 		}
 		path := parts[len(parts)-1]
-		
+
 		// Categorize by file path and name
 		switch {
 		case strings.Contains(path, "_test.go") || strings.Contains(path, "/test/") || strings.Contains(path, "/tests/"):
 			testFiles = append(testFiles, path)
-		case strings.Contains(path, "/config/") || strings.Contains(path, ".yaml") || strings.Contains(path, ".yml") || 
-		     strings.Contains(path, ".json") || strings.Contains(path, ".toml"):
+		case strings.Contains(path, "/config/") || strings.Contains(path, ".yaml") || strings.Contains(path, ".yml") ||
+			strings.Contains(path, ".json") || strings.Contains(path, ".toml"):
 			configFiles = append(configFiles, path)
 		case strings.Contains(path, "generated") || strings.Contains(path, ".pb.go") || strings.Contains(path, "_gen.go"):
 			generatedFiles = append(generatedFiles, path)
@@ -79,7 +79,7 @@ func categorizeFiles(nameStatus string, b *strings.Builder) {
 			coreFiles = append(coreFiles, path)
 		}
 	}
-	
+
 	if len(coreFiles) > 0 {
 		b.WriteString(fmt.Sprintf("- **核心代码** (%d files): %s\n", len(coreFiles), strings.Join(coreFiles[:min(5, len(coreFiles))], ", ")))
 		if len(coreFiles) > 5 {

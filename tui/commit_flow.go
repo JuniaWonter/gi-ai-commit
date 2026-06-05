@@ -4,7 +4,6 @@ import (
 	"encoding/json"
 	"fmt"
 	"os"
-	"os/exec"
 	"regexp"
 	"strings"
 
@@ -684,23 +683,6 @@ func extractHash(results []ai.ToolCallResult) string {
 	return ""
 }
 
-func getStagedFiles() []string {
-	gitRoot, err := git.GetGitRoot()
-	if err != nil {
-		return nil
-	}
-	cmd := exec.Command("git", "diff", "--cached", "--name-only")
-	cmd.Dir = gitRoot
-	output, _ := cmd.Output()
-	lines := strings.Split(strings.TrimSpace(string(output)), "\n")
-	var result []string
-	for _, l := range lines {
-		if l = strings.TrimSpace(l); l != "" {
-			result = append(result, l)
-		}
-	}
-	return result
-}
 
 // RunCommitFlow is the public entry point for the TUI.
 func RunCommitFlow(files []diff.FileChange, opts CommitFlowOptions) (CommitFlowResult, error) {

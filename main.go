@@ -58,7 +58,7 @@ func main() {
 			}
 			logger.Error("commit 命令失败: %v", err)
 			fmt.Fprintf(os.Stderr, "❌ 错误：%v\n", err)
-			
+
 			// Exit with different codes based on error type
 			switch {
 			case strings.Contains(err.Error(), "AI 执行失败") || strings.Contains(err.Error(), "AI 未调用"):
