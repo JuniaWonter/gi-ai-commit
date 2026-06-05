@@ -1280,15 +1280,16 @@ func buildAuthSystemPrompt(conventionInfo git.ConventionInfo, scopeHints []strin
 		b.WriteString("\n")
 	}
 
-	if skillMgr != nil && skillMgr.HasTool("codegraph_find_symbol") {
+	if skillMgr != nil && skillMgr.HasTool("codegraph_search") {
 		b.WriteString("\n【代码图分析工具】\n")
 		b.WriteString("可使用 codegraph_* 工具深入分析代码结构：\n")
-		b.WriteString("- codegraph_find_symbol: 查找符号定义（函数、类、变量）\n")
-		b.WriteString("- codegraph_find_callers: 查找调用者（谁调用了这个函数）\n")
-		b.WriteString("- codegraph_find_callees: 查找被调用者（这个函数调用了谁）\n")
-		b.WriteString("- codegraph_find_impact: 分析变更影响范围\n")
-		b.WriteString("- codegraph_class_hierarchy: 查看类继承关系\n")
-		b.WriteString("适用场景：理解复杂调用链、评估重构影响、识别循环依赖\n")
+		b.WriteString("- codegraph_search: 按名称搜索符号（函数、类、变量）\n")
+		b.WriteString("- codegraph_explore: 深度探索代码结构和调用关系（推荐首先使用）\n")
+		b.WriteString("- codegraph_callers: 查找调用者（谁调用了这个函数）\n")
+		b.WriteString("- codegraph_callees: 查找被调用者（这个函数调用了谁）\n")
+		b.WriteString("- codegraph_impact: 分析变更影响范围\n")
+		b.WriteString("- codegraph_node: 获取符号详细信息和上下文\n")
+		b.WriteString("适用场景：理解复杂调用链、评估重构影响、搜索代码结构\n")
 	}
 
 	b.WriteString("\n【规则】\n")
@@ -1338,8 +1339,8 @@ func buildAuthSystemPromptCompact(conventionInfo git.ConventionInfo, scopeHints 
 		b.WriteString("规范:\n" + truncate(conventionInfo.AllConventionTools, 300) + "\n")
 	}
 
-	if skillMgr != nil && skillMgr.HasTool("codegraph_find_symbol") {
-		b.WriteString("代码图工具: codegraph_find_symbol/find_callers/find_callees/find_impact/class_hierarchy 可用于深入分析代码结构和调用关系\n")
+	if skillMgr != nil && skillMgr.HasTool("codegraph_search") {
+		b.WriteString("代码图工具: codegraph_search/explore/callers/callees/impact/node 可用于深入分析代码结构和调用关系\n")
 	}
 
 	b.WriteString("规则: 读代码再判断; report_review 在 git_commit 前; commit 描述变更本身; git_commit 是目标; 失败用 amend; 发现重要模式可 update_memory(最多1次)\n")
@@ -1777,6 +1778,73 @@ func (c *Client) GenerateDescription(projectInfo, fileInfo, diffContent string) 
 
 	if len(resp.Choices) == 0 {
 		logger.Error("GenerateDescription API 返回空响应")
+		return "", fmt.Errorf("API 返回空响应")
+	}
+
+	return strings.TrimSpace(resp.Choices[0].Message.Content), nil
+}
+
+func (c *Client) GenerateMemory(commitMsg, reviewSummary, existingMemory, diffContent string) (string, error) {
+	var prompt strings.Builder
+	prompt.WriteString("请根据以下信息，生成或更新项目记忆（200-500 字）。\n\n")
+
+	if existingMemory != "" {
+		prompt.WriteString("现有记忆：\n")
+		prompt.WriteString(existingMemory)
+		prompt.WriteString("\n\n")
+	}
+
+	prompt.WriteString("本次提交：\n")
+	prompt.WriteString(commitMsg)
+	prompt.WriteString("\n\n")
+
+	if reviewSummary != "" {
+		prompt.WriteString("审查摘要：\n")
+		prompt.WriteString(reviewSummary)
+		prompt.WriteString("\n\n")
+	}
+
+	if diffContent != "" {
+		prompt.WriteString("代码变更（参考）：\n")
+		prompt.WriteString(truncate(diffContent, 2000))
+		prompt.WriteString("\n\n")
+	}
+
+	prompt.WriteString("请记录以下维度的项目知识（选择性记录，只记有价值的内容）：\n")
+	prompt.WriteString("1. 架构模式：项目的模块划分、核心组件关系\n")
+	prompt.WriteString("2. 代码约定：命名规范、错误处理模式、常用工具函数\n")
+	prompt.WriteString("3. 易错点：容易出 bug 的地方、需要注意的边界条件\n")
+	prompt.WriteString("4. 审查规则：项目特有的审查要点\n\n")
+	prompt.WriteString("要求：\n")
+	prompt.WriteString("- 只记录有长期价值的知识，不要记录临时性变更\n")
+	prompt.WriteString("- 如果现有记忆已有相关内容，合并更新而非重复追加\n")
+	prompt.WriteString("- 保持简洁，每条知识 1-2 行\n")
+	prompt.WriteString("- 只返回记忆内容，不要其他说明\n")
+
+	req := openai.ChatCompletionRequest{
+		Model: c.config.Model,
+		Messages: []openai.ChatCompletionMessage{
+			{
+				Role:    openai.ChatMessageRoleSystem,
+				Content: "你是一个项目知识管理助手。你的任务是从代码变更中提取有长期价值的项目知识。",
+			},
+			{
+				Role:    openai.ChatMessageRoleUser,
+				Content: prompt.String(),
+			},
+		},
+		Temperature: 0.3,
+	}
+
+	ctx, cancel := context.WithTimeout(context.Background(), c.config.Timeout)
+	defer cancel()
+
+	resp, err := c.client.CreateChatCompletion(ctx, req)
+	if err != nil {
+		return "", fmt.Errorf("调用 AI API 失败：%w", err)
+	}
+
+	if len(resp.Choices) == 0 {
 		return "", fmt.Errorf("API 返回空响应")
 	}
 

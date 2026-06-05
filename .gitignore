@@ -27,3 +27,7 @@ git-ai-commit
 .firecrawl/search-google-code-review.json
 
 .firecrawl/search-review-dimensions.json
+
+.codegraph/daemon.pid
+
+.codegraph/.gitignore

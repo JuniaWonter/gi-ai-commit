@@ -13,6 +13,7 @@ import (
 	"github.com/oliver/git-ai-commit/internal/description"
 	"github.com/oliver/git-ai-commit/internal/diff"
 	"github.com/oliver/git-ai-commit/internal/logger"
+	"github.com/oliver/git-ai-commit/internal/memory"
 	"github.com/oliver/git-ai-commit/internal/project"
 	"github.com/oliver/git-ai-commit/internal/skill"
 	"github.com/oliver/git-ai-commit/tui"
@@ -84,7 +85,7 @@ func RunCommit(opts CommitOptions) error {
 	fmt.Println("🔧 加载 Skills...")
 	skillMgr := skill.NewManager()
 	skillsDir := skill.GetSkillsDir()
-	if err := skillMgr.Discover(context.Background(), skillsDir); err != nil {
+	if err := skillMgr.Discover(context.Background(), skillsDir, gitRoot); err != nil {
 		logger.Warn("发现 Skills 失败: %v", err)
 	}
 	defer skillMgr.Shutdown()
@@ -147,6 +148,12 @@ func RunCommit(opts CommitOptions) error {
 	if err := counter.Increment(); err != nil {
 		logger.Warn("更新计数失败: %v", err)
 		return fmt.Errorf("更新计数失败：%w", err)
+	}
+
+	count, _ := counter.Get()
+	const memoryUpdateInterval = 5
+	if memory.ShouldUpdate(count, memoryUpdateInterval) {
+		go updateMemory(client, result.CommitMessage, result)
 	}
 
 	logger.Info("提交成功 commitHash=%s", result.CommitHash)
@@ -256,4 +263,30 @@ func getProjectRoot() (string, error) {
 		return "", fmt.Errorf("获取项目根目录失败：%w", err)
 	}
 	return strings.TrimSpace(string(output)), nil
+}
+
+func updateMemory(client *ai.Client, commitMsg string, result tui.CommitFlowResult) {
+	existingMemory, _ := memory.Read()
+
+	reviewSummary := ""
+	if result.ReviewResult != nil {
+		reviewSummary = result.ReviewResult.Summary
+	}
+
+	stagedDiff, _ := diff.GetStagedDiff()
+
+	fmt.Println("🧠 更新项目记忆...")
+	newMemory, err := client.GenerateMemory(commitMsg, reviewSummary, existingMemory, stagedDiff)
+	if err != nil {
+		logger.Warn("生成项目记忆失败: %v", err)
+		return
+	}
+
+	if err := memory.Write(newMemory); err != nil {
+		logger.Warn("写入项目记忆失败: %v", err)
+		return
+	}
+
+	fmt.Println("✅ 项目记忆已更新")
+	logger.Info("项目记忆已更新 length=%d", len(newMemory))
 }

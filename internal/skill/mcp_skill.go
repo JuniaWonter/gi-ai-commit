@@ -14,8 +14,8 @@ type MCPSkill struct {
 	tools    []ToolDefinition
 }
 
-func NewMCPSkill(ctx context.Context, manifest *Manifest) (*MCPSkill, error) {
-	client, err := mcp.Connect(ctx, manifest.Command, manifest.Args, manifest.Env)
+func NewMCPSkill(ctx context.Context, manifest *Manifest, projectPath string) (*MCPSkill, error) {
+	client, err := mcp.Connect(ctx, manifest.Command, manifest.Args, manifest.Env, projectPath)
 	if err != nil {
 		return nil, fmt.Errorf("连接 MCP server 失败: %w", err)
 	}

@@ -19,11 +19,11 @@ func NewManager() *Manager {
 	return &Manager{}
 }
 
-func (m *Manager) Discover(ctx context.Context, skillsDir string) error {
+func (m *Manager) Discover(ctx context.Context, skillsDir string, projectPath string) error {
 	entries, err := os.ReadDir(skillsDir)
 	if err != nil {
 		if os.IsNotExist(err) {
-			logger.Info("skills 目录不存在: %s", skillsDir)
+			logger.Debug("skills 目录不存在: %s", skillsDir)
 			return nil
 		}
 		return fmt.Errorf("读取 skills 目录失败: %w", err)
@@ -56,7 +56,7 @@ func (m *Manager) Discover(ctx context.Context, skillsDir string) error {
 			continue
 		}
 
-		skill, err := NewMCPSkill(ctx, &manifest)
+		skill, err := NewMCPSkill(ctx, &manifest, projectPath)
 		if err != nil {
 			logger.Warn("初始化 skill 失败: %s, err: %v", manifest.Name, err)
 			continue
@@ -116,14 +116,13 @@ func (m *Manager) SkillNames() []string {
 }
 
 func GetSkillsDir() string {
-	exe, err := os.Executable()
+	home, err := os.UserHomeDir()
 	if err != nil {
 		return ""
 	}
-	dir := filepath.Dir(exe)
-	return filepath.Join(dir, "skills")
+	return filepath.Join(home, ".config", "ai-commit", "skills")
 }
 
 func IsSkillTool(name string) bool {
-	return strings.HasPrefix(name, "codegraph_") || strings.HasPrefix(name, "code_graph")
+	return strings.HasPrefix(name, "codegraph_")
 }

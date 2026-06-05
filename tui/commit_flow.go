@@ -65,6 +65,7 @@ type CommitFlowResult struct {
 	TotalTokens      int
 	IsPartial        bool
 	RemainingFiles   []string
+	ReviewResult     *ai.ReviewResult
 }
 
 // CommitFlowModel is the root model. It acts as a thin router,
@@ -600,6 +601,7 @@ func (m *CommitFlowModel) GetResult() CommitFlowResult {
 		TotalTokens:      result.TotalTokens,
 		IsPartial:        m.isPartialCommit,
 		RemainingFiles:   m.remainingFiles,
+		ReviewResult:     m.reviewResult,
 	}
 }
 

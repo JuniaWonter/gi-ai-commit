@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"os/exec"
+	"strings"
 
 	"github.com/modelcontextprotocol/go-sdk/mcp"
 )
@@ -25,8 +26,13 @@ type ToolResult struct {
 	IsError bool
 }
 
-func Connect(ctx context.Context, command string, args []string, env map[string]string) (*Client, error) {
-	cmd := exec.CommandContext(ctx, command, args...)
+func Connect(ctx context.Context, command string, args []string, env map[string]string, projectPath string) (*Client, error) {
+	resolvedArgs := make([]string, len(args))
+	for i, arg := range args {
+		resolvedArgs[i] = strings.ReplaceAll(arg, "{projectPath}", projectPath)
+	}
+
+	cmd := exec.CommandContext(ctx, command, resolvedArgs...)
 	for k, v := range env {
 		cmd.Env = append(cmd.Env, fmt.Sprintf("%s=%s", k, v))
 	}
