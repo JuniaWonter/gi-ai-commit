@@ -56,6 +56,8 @@ go test -v ./internal/diff/ -run TestParseNumStat
 - **contentH** must clamp to ≥1 after subtraction
 - **Overlay** is a bottom confirmation bar, not a screen overlay (replaces FooterBar). Only used for `summarize_changes` phase transition; git_commit uses `ask_user` tool instead
 - **renderMarkdown** needs `Width()` set on all lines for wrapping
+- **Streaming rendering**: Live `streamContent`/`streamThinking` use `renderStreamText` (plain text, no regex) to avoid layout jumps as incomplete markdown is parsed. Full `renderMarkdown` only applied to `reviewOutput` after `FlushStream`.
+- **Unclosed code blocks**: `renderStreamText` shows code block content with dim styling even when `` ``` `` hasn't closed yet, preventing content from disappearing during streaming.
 - **Viewport sizing**: `SetViewportSize` must be called once after Panel creation; `WindowSizeMsg` must forward to Panel on resize
 
 ## File type priority

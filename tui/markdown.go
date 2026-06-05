@@ -118,6 +118,16 @@ func renderMarkdown(text string, maxWidth int) string {
 }
 
 func processInlineMarkdown(text string) string {
+	// Inline code first (protects content from bold/italic processing)
+	text = mdCodeRE.ReplaceAllStringFunc(text, func(match string) string {
+		inner := match[1 : len(match)-1]
+		return lipgloss.NewStyle().
+			Foreground(Th.Warning).
+			Background(Th.SurfaceAlt).
+			Padding(0, 1).
+			Render(inner)
+	})
+
 	// Links: [text](url) → text (underline)
 	text = mdLinkRE.ReplaceAllStringFunc(text, func(match string) string {
 		parts := mdLinkRE.FindStringSubmatch(match)
@@ -142,15 +152,42 @@ func processInlineMarkdown(text string) string {
 		return lipgloss.NewStyle().Italic(true).Foreground(Th.Accent).Render(inner)
 	})
 
-	// Inline code
-	text = mdCodeRE.ReplaceAllStringFunc(text, func(match string) string {
-		inner := match[1 : len(match)-1]
-		return lipgloss.NewStyle().
-			Foreground(Th.Warning).
-			Background(Th.SurfaceAlt).
-			Padding(0, 1).
-			Render(inner)
-	})
-
 	return text
+}
+
+// renderStreamText renders incomplete streaming text without markdown regex.
+// It handles unclosed code blocks by showing them with dim styling instead of hiding.
+func renderStreamText(text string, maxWidth int) string {
+	if maxWidth <= 0 {
+		maxWidth = 80
+	}
+
+	lines := strings.Split(text, "\n")
+	var out strings.Builder
+	inCodeBlock := false
+
+	for _, rawLine := range lines {
+		line := strings.TrimRight(rawLine, " \t")
+
+		if strings.HasPrefix(line, "```") {
+			if inCodeBlock {
+				inCodeBlock = false
+			} else {
+				inCodeBlock = true
+			}
+			continue
+		}
+
+		if inCodeBlock {
+			out.WriteString(lipgloss.NewStyle().
+				Foreground(Th.DimText).
+				Width(maxWidth).
+				Render(line) + "\n")
+			continue
+		}
+
+		out.WriteString(lipgloss.NewStyle().Width(maxWidth).Render(line) + "\n")
+	}
+
+	return out.String()
 }
