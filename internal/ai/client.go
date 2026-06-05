@@ -872,9 +872,7 @@ func (s *CommitSession) fillFallbackTokenEstimate(outputContent string) {
 			inputText.WriteString(tool.Function.Name)
 			inputText.WriteString(tool.Function.Description)
 			if tool.Function.Parameters != nil {
-				if params, ok := tool.Function.Parameters.(json.RawMessage); ok {
-					inputText.WriteString(string(params))
-				}
+				inputText.WriteString(fmt.Sprintf("%v", tool.Function.Parameters))
 			}
 		}
 	}
