@@ -41,11 +41,6 @@ type Config struct {
 	ContextWindow int
 }
 
-const (
-	PhaseUnderstand = 1
-	PhaseCommit     = 2
-)
-
 func NewClient(config Config) (*Client, error) {
 	if config.APIKey == "" {
 		logger.Error("API Key 未配置")
@@ -181,10 +176,6 @@ type CommitSession struct {
 	toolCache            map[string]string
 	readFiles            map[string]bool
 	mu                   sync.Mutex
-	// 两阶段架构
-	phase              int
-	understanding      string
-	phase2SystemPrompt string
 	// 审查结果
 	ReviewResult *ReviewResult
 	// Skill 系统
@@ -284,33 +275,28 @@ type CommitResult struct {
 	TotalTokens      int
 }
 
-// StartCommitSession 启动两阶段提交会话。
-// Phase 1（理解阶段）：AI 阅读代码变更，输出结构化理解，调用 summarize_changes 进入 Phase 2。
-// Phase 2（审查提交阶段）：AI 基于已有理解进行审查并提交。
+// StartCommitSession 启动 ReAct Agent 提交会话。
+// AI 可以自由使用所有工具，通过 ReAct 循环完成：理解变更 → 审查风险 → 提交代码。
+// 工具错误会反馈给 AI，由 AI 决定如何处理，直到成功提交或达到终止条件。
 func (c *Client) StartCommitSession(diffContent, description string, conventionInfo git.ConventionInfo, maxRetries int, selectedFiles []string, skillMgr *skill.Manager) (*CommitSession, error) {
 	scopeHints := inferScopeHints(selectedFiles)
 
 	memoryContent, _ := memory.Read()
 
-	systemPrompt := buildUnderstandSystemPrompt(conventionInfo, memoryContent)
-	userPrompt := buildUnderstandUserPrompt(diffContent, description)
+	systemPrompt := buildReActSystemPrompt(conventionInfo, scopeHints, memoryContent, skillMgr)
+	userPrompt := buildReActUserPrompt(diffContent, description)
 
 	estimatedTokens := estimateTokenCount(systemPrompt + userPrompt)
 	compactMode := estimatedTokens > 6000
 
 	if compactMode {
-		systemPrompt = buildUnderstandSystemPromptCompact(conventionInfo, memoryContent)
-		userPrompt = buildUnderstandUserPromptCompact(diffContent)
+		systemPrompt = buildReActSystemPromptCompact(conventionInfo, scopeHints, memoryContent, skillMgr)
+		userPrompt = buildReActUserPromptCompact(diffContent)
 	}
 
 	messages := []openai.ChatCompletionMessage{
 		{Role: openai.ChatMessageRoleSystem, Content: systemPrompt},
 		{Role: openai.ChatMessageRoleUser, Content: userPrompt},
-	}
-
-	phase2Prompt := buildAuthSystemPrompt(conventionInfo, scopeHints, memoryContent, skillMgr)
-	if compactMode {
-		phase2Prompt = buildAuthSystemPromptCompact(conventionInfo, scopeHints, memoryContent, skillMgr)
 	}
 
 	tools := buildOpenAITools()
@@ -330,8 +316,6 @@ func (c *Client) StartCommitSession(diffContent, description string, conventionI
 		compactMode:          compactMode,
 		toolCache:            make(map[string]string),
 		readFiles:            make(map[string]bool),
-		phase:                PhaseUnderstand,
-		phase2SystemPrompt:   phase2Prompt,
 		skillManager:         skillMgr,
 		startTime:            time.Now(),
 		maxDuration:          10 * time.Minute, // 10 minute timeout
@@ -341,7 +325,7 @@ func (c *Client) StartCommitSession(diffContent, description string, conventionI
 	return sess, nil
 }
 
-// ContinueCommitSession 从持久化会话继续，直接进入 Phase 2（审查提交阶段）。
+// ContinueCommitSession 从持久化会话继续，使用 ReAct 模式继续审查提交。
 func (c *Client) ContinueCommitSession(ps *PersistableSession, diffContent string, conventionInfo git.ConventionInfo, selectedFiles []string, skillMgr *skill.Manager) (*CommitSession, error) {
 	messages := make([]openai.ChatCompletionMessage, len(ps.Messages))
 	copy(messages, ps.Messages)
@@ -355,9 +339,9 @@ func (c *Client) ContinueCommitSession(ps *PersistableSession, diffContent strin
 	memoryContent, _ := memory.Read()
 
 	scopeHints := inferScopeHints(selectedFiles)
-	systemPrompt := buildAuthSystemPrompt(conventionInfo, scopeHints, memoryContent, skillMgr)
+	systemPrompt := buildReActSystemPrompt(conventionInfo, scopeHints, memoryContent, skillMgr)
 	if ps.CompactMode {
-		systemPrompt = buildAuthSystemPromptCompact(conventionInfo, scopeHints, memoryContent, skillMgr)
+		systemPrompt = buildReActSystemPromptCompact(conventionInfo, scopeHints, memoryContent, skillMgr)
 	}
 	if len(messages) > 0 && messages[0].Role == openai.ChatMessageRoleSystem {
 		messages[0].Content = systemPrompt
@@ -382,7 +366,6 @@ func (c *Client) ContinueCommitSession(ps *PersistableSession, diffContent strin
 		compactMode:          ps.CompactMode,
 		toolCache:            make(map[string]string),
 		readFiles:            make(map[string]bool),
-		phase:                PhaseCommit,
 		skillManager:         skillMgr,
 		startTime:            time.Now(),
 		maxDuration:          10 * time.Minute, // 10 minute timeout
@@ -514,6 +497,15 @@ func (s *CommitSession) StreamAI(send func(chunk StreamChunk)) ([]PendingToolCal
 	send(StreamChunk{Done: true})
 	s.streaming = false
 
+	// Log what the AI returned
+	logger.Debug("AI response: content=%d chars, tool_calls=%d, finish_reason=%s", 
+		len(fullContent.String()), len(toolCalls), finishReason)
+	if len(toolCalls) > 0 {
+		for i, tc := range toolCalls {
+			logger.Debug("  Tool call[%d]: %s", i, tc.Function.Name)
+		}
+	}
+
 	// 如果流式响应未返回 token 用量（部分 API 提供商不支持），用本地估算兜底
 	if s.totalTokens == 0 {
 		s.fillFallbackTokenEstimate(fullContent.String())
@@ -581,7 +573,9 @@ func (s *CommitSession) StreamAI(send func(chunk StreamChunk)) ([]PendingToolCal
 			return []PendingToolCall{fallbackTC}, nil
 		}
 
-		// 正常情况：没有 tool calls，存储为最终消息
+		// 正常情况：AI 输出了文本但没有调用工具
+		// 这是 ReAct 模式的一部分 - AI 可能在思考或输出中间结果
+		// 返回空 pending，让 ExecuteAndResumeWithStream 决定是否继续
 		s.commitMsg = msg
 		return nil, nil
 	}
@@ -609,8 +603,8 @@ func (s *CommitSession) ExecuteAndResume(pending []PendingToolCall, authorized [
 }
 
 func (s *CommitSession) ExecuteAndResumeWithStream(pending []PendingToolCall, authorized []bool, send func(chunk StreamChunk)) ([]PendingToolCall, error) {
-	logger.Debug("ExecuteAndResumeWithStream: loop=%d/%d, retry=%d/%d, phase=%d, tools=%d", 
-		s.loopCount, s.maxLoops, s.retryCount, s.maxRetries, s.phase, len(pending))
+	logger.Debug("ExecuteAndResumeWithStream: loop=%d/%d, retry=%d/%d, tools=%d", 
+		s.loopCount, s.maxLoops, s.retryCount, s.maxRetries, len(pending))
 	
 	// Check session timeout
 	if time.Since(s.startTime) > s.maxDuration {
@@ -632,13 +626,9 @@ func (s *CommitSession) ExecuteAndResumeWithStream(pending []PendingToolCall, au
 		return nil, fmt.Errorf("提交失败次数达上限（%d 次），请手动处理", s.maxRetries)
 	}
 
-	// 检查此轮是否包含 summarize_changes（用于 Phase 1 → Phase 2 转换）
-	hasSummarize := false
+	// Log tool calls
 	for _, tc := range pending {
 		logger.Debug("工具调用: %s", tc.Name)
-		if tc.Name == "summarize_changes" {
-			hasSummarize = true
-		}
 	}
 
 	type execResult struct {
@@ -727,20 +717,6 @@ func (s *CommitSession) ExecuteAndResumeWithStream(pending []PendingToolCall, au
 			Content:    r.result,
 			ToolCallID: tc.ID,
 		})
-	}
-
-	// Phase transition: summarize_changes 触发 Phase 1 → Phase 2
-	if s.phase == PhaseUnderstand && hasSummarize {
-		logger.Info("Phase 转换: Phase 1 (理解) → Phase 2 (审查提交)")
-		for _, tr := range s.toolResults {
-			if tr.ToolName == "summarize_changes" {
-				if idx := strings.Index(tr.Result, "UNDERSTANDING_RECORDED: "); idx >= 0 {
-					s.understanding = tr.Result[idx+len("UNDERSTANDING_RECORDED: "):]
-				}
-				break
-			}
-		}
-		s.transitionToPhase2()
 	}
 
 	committed := false
@@ -837,18 +813,6 @@ func (s *CommitSession) compressMessagesInMemory() {
 
 	s.messages = keep
 	logger.Debug("Compressed messages from %d to %d", originalLen, len(keep))
-}
-
-// transitionToPhase2 从理解阶段切换到审查提交阶段
-func (s *CommitSession) transitionToPhase2() {
-	s.phase = PhaseCommit
-	s.loopCount = 0 // Phase 2 有独立的轮次预算
-	for i, msg := range s.messages {
-		if msg.Role == openai.ChatMessageRoleSystem {
-			s.messages[i].Content = s.phase2SystemPrompt
-			return
-		}
-	}
 }
 
 func (s *CommitSession) GetResult() CommitResult {
@@ -1772,12 +1736,25 @@ func buildUnderstandSystemPrompt(conventionInfo git.ConventionInfo, memoryConten
 		b.WriteString("\n\n")
 	}
 
-	b.WriteString("【大变更集处理策略】\n")
-	b.WriteString("- diff 开头可能包含「变更文件分组（按目录）」索引，按目录列出所有变更文件及数量\n")
-	b.WriteString("- 先看分组索引了解全貌，再决定读哪些文件\n")
-	b.WriteString("- 优先读取 core 类型文件（核心业务逻辑），跳过 test/config/generated 文件\n")
-	b.WriteString("- 每个文件用 start_line/end_line 限定行范围，不要读整个文件\n")
+	b.WriteString("【大变更集处理策略】（重要！）\n")
+	b.WriteString("当变更涉及多个文件或大量代码时，必须采用系统性方法：\n\n")
+	b.WriteString("第一步：全局扫描\n")
+	b.WriteString("- diff 开头包含「变更文件分组（按目录）」索引，先通读了解全貌\n")
+	b.WriteString("- 识别变更类型：新功能、重构、修复、配置变更等\n")
+	b.WriteString("- 标记关键文件：core 业务逻辑 > API/接口 > 数据模型 > 工具函数\n\n")
+	b.WriteString("第二步：优先级排序\n")
+	b.WriteString("- 高优先级：核心业务逻辑、API 变更、数据模型变更\n")
+	b.WriteString("- 中优先级：工具函数、配置解析、错误处理\n")
+	b.WriteString("- 低优先级：测试文件、配置文件、生成的代码、文档\n\n")
+	b.WriteString("第三步：深度阅读\n")
+	b.WriteString("- 对高优先级文件：用 read_file 读取完整变更上下文（包含前后 20 行）\n")
+	b.WriteString("- 对中优先级文件：读取变更行及关键函数签名\n")
+	b.WriteString("- 对低优先级文件：仅看 diff 摘要，除非有特殊需要\n")
 	b.WriteString("- 同一目录下的文件通常相关，可以一起理解\n\n")
+	b.WriteString("第四步：关联分析\n")
+	b.WriteString("- 识别跨文件的影响：一个文件的变更是否影响其他文件\n")
+	b.WriteString("- 检查接口变更：函数签名、类型定义、API 端点的变更\n")
+	b.WriteString("- 理解变更目的：这些修改是为了解决什么问题\n\n")
 
 	b.WriteString("【执行步骤】\n")
 	b.WriteString("1. diff_overview → 了解变更概览（无需授权，自动执行）\n")
@@ -1818,7 +1795,7 @@ func buildUnderstandUserPrompt(diffContent, description string) string {
 	}
 
 	b.WriteString("代码变更：\n")
-	truncatedDiff := truncate(diffContent, 4000)
+	truncatedDiff := truncate(diffContent, 8000)
 	b.WriteString(truncatedDiff)
 	b.WriteString("\n\n")
 
@@ -1857,11 +1834,241 @@ func buildUnderstandUserPromptCompact(diffContent string) string {
 	var b strings.Builder
 
 	b.WriteString("代码变更：\n")
-	truncatedDiff := truncateCompact(diffContent, 2000)
+	truncatedDiff := truncateCompact(diffContent, 4000)
 	b.WriteString(truncatedDiff)
 	b.WriteString("\n\n")
 
 	b.WriteString("步骤: diff_overview → read_file → 输出理解 → summarize_changes\n")
+
+	return b.String()
+}
+
+// buildReActSystemPrompt 构建 ReAct Agent 系统提示词
+// AI 可以自由使用所有工具，通过 ReAct 循环完成：理解变更 → 审查风险 → 提交代码
+func buildReActSystemPrompt(conventionInfo git.ConventionInfo, scopeHints []string, memoryContent string, skillMgr *skill.Manager) string {
+	var b strings.Builder
+	b.WriteString("你是资深代码审查助手，使用 ReAct（Reasoning + Acting）模式工作。\n\n")
+
+	if memoryContent != "" {
+		b.WriteString("【项目记忆】（历史积累的项目知识，帮助你更好地审查代码）\n")
+		b.WriteString(truncate(memoryContent, 800))
+		b.WriteString("\n\n")
+	}
+
+	b.WriteString("【ReAct 工作模式】\n")
+	b.WriteString("你通过「思考 → 行动 → 观察」的循环来完成任务：\n")
+	b.WriteString("1. 思考（Thought）：分析当前情况，决定下一步\n")
+	b.WriteString("2. 行动（Action）：调用工具执行操作\n")
+	b.WriteString("3. 观察（Observation）：查看工具返回结果，继续思考\n")
+	b.WriteString("循环直到成功提交代码或明确无法提交。\n\n")
+
+	b.WriteString("【核心原则】\n")
+	b.WriteString("1. 读代码，再做判断：严禁仅凭文件名或 diff 摘要推断风险。必须 read_file 读取具体代码后再分析。\n")
+	b.WriteString("2. 先理解再判断：读代码后先总结「变更结构摘要」（改了哪些文件、函数、类型），再基于这个理解做审查。\n")
+	b.WriteString("3. 审查与提交分离：审查意见是给用户的辅助信息，commit message 必须基于代码变更本身生成。\n")
+	b.WriteString("4. 节约 token：每次工具调用结果都会累积在对话中。只读必要的行，不读整个文件。\n")
+	b.WriteString("5. 自由使用 Git：你可以自由使用所有 Git 工具（status/log/branch/stash/add/restore/diff/blame/tag）来辅助理解和操作。\n")
+	b.WriteString("6. 错误处理：工具返回错误时，分析错误原因，决定如何处理（重试、跳过、或告知用户）。\n\n")
+
+	b.WriteString("【审查维度】（8 个维度，根据变更类型选择性检查）\n")
+	b.WriteString("1. 正确性 (correctness): 逻辑缺陷、边界条件、竞态条件、状态转换\n")
+	b.WriteString("2. 安全性 (security): 注入、XSS、权限泄露、敏感信息暴露\n")
+	b.WriteString("3. 性能 (performance): 不必要的循环、重复查询、内存泄漏\n")
+	b.WriteString("4. 错误处理 (error_handling): 异常未捕获、降级缺失、错误信息不明确\n")
+	b.WriteString("5. 设计 (design): 架构合理性、职责划分、接口设计\n")
+	b.WriteString("6. 测试 (testing): 测试覆盖、边界用例、回归风险\n")
+	b.WriteString("7. 可维护性 (maintainability): 魔法数字、过度耦合、命名清晰度\n")
+	b.WriteString("8. 一致性 (consistency): 代码风格、命名规范、项目约定\n")
+	b.WriteString("审查结果须引用具体代码行说明判断依据。\n\n")
+
+	b.WriteString("【简单变更快速通道】\n")
+	b.WriteString("如果变更极为简单（如纯注释、单行修复、配置微调），可设置 is_simple=true 跳过详细审查。\n")
+	b.WriteString("判断标准：变更不涉及逻辑、不影响运行时行为、不改变接口。\n\n")
+
+	b.WriteString("【Git 工具自由使用】\n")
+	b.WriteString("你可以自由使用以下 Git 工具来辅助工作：\n")
+	b.WriteString("- git_status: 查看工作区状态\n")
+	b.WriteString("- git_log: 查看提交历史\n")
+	b.WriteString("- git_branch: 查看分支信息\n")
+	b.WriteString("- git_diff_unstaged: 查看未暂存的变更\n")
+	b.WriteString("- git_add: 暂存文件\n")
+	b.WriteString("- git_restore: 取消暂存或恢复文件\n")
+	b.WriteString("- git_stash: 暂存/恢复工作区变更\n")
+	b.WriteString("- git_blame: 查看文件 blame 信息\n")
+	b.WriteString("- git_tag: 管理标签\n")
+	b.WriteString("使用场景：了解项目历史、检查分支状态、暂存不相关变更、查看代码历史等。\n\n")
+
+	b.WriteString("【提交流程】（必须完成所有步骤）\n")
+	b.WriteString("1. 基于已有理解分析风险，必要时用 read_file 补充阅读\n")
+	b.WriteString("2. 调用 report_review 输出审查意见（必须在 git_commit 之前调用）\n")
+	b.WriteString("3. 使用 ask_user 向用户确认 commit message（展示你准备的 message，让用户确认或修改）\n")
+	b.WriteString("4. 调用 git_commit 提交（commit message 基于变更结构摘要，而非审查结论）\n")
+	b.WriteString("5. 提交成功后输出 【最终提交信息】\n\n")
+	b.WriteString("⚠️ 重要：你必须调用 git_commit 完成提交。仅调用 report_review 不算完成任务。如果用户拒绝提交，使用 ask_user 询问原因并记录，但仍需结束流程。\n\n")
+
+	b.WriteString("【Commit 格式】\n")
+	b.WriteString("<type>(<scope>): <subject>\n")
+	b.WriteString("type: feat|fix|docs|style|refactor|perf|test|build|ci|chore|revert\n")
+	b.WriteString("scope: 可选\n")
+	b.WriteString("subject: 中文，具体描述代码变更内容，**至少 20 个字符**\n")
+	b.WriteString("破坏性变更: type!: 或 BREAKING CHANGE:\n\n")
+	
+	b.WriteString("【Commit Message 质量要求】\n")
+	b.WriteString("❌ 禁止使用泛化、无意义的 subject，例如：\n")
+	b.WriteString("   - chore: 提交变更\n")
+	b.WriteString("   - feat: 添加功能\n")
+	b.WriteString("   - fix: 修复问题\n")
+	b.WriteString("   - refactor: 重构代码\n")
+	b.WriteString("   - docs: 更新文档\n\n")
+	b.WriteString("✅ subject 必须具体描述「改了什么」，例如：\n")
+	b.WriteString("   - feat(auth): 添加 OAuth2 登录支持\n")
+	b.WriteString("   - fix(api): 修复分页查询返回空结果的问题\n")
+	b.WriteString("   - refactor(parser): 将 JSON 解析逻辑提取为独立函数\n")
+	b.WriteString("   - docs: 补充 API 错误码说明文档\n")
+	b.WriteString("   - perf(db): 优化用户查询 SQL，减少 JOIN 操作\n\n")
+	b.WriteString("⚠️ 自检清单：\n")
+	b.WriteString("   1. subject 是否能让其他人一眼看出改了什么？\n")
+	b.WriteString("   2. 是否基于实际代码变更，而非审查结论？\n")
+	b.WriteString("   3. 是否避免了「提交变更」「更新代码」等废话？\n")
+	b.WriteString("   如果答案是「否」，重新生成 commit message。\n\n")
+
+	if len(scopeHints) > 0 {
+		b.WriteString("推荐 scope: ")
+		for i, s := range scopeHints {
+			if i < 3 {
+				if i > 0 {
+					b.WriteString(", ")
+				}
+				b.WriteString(s)
+			}
+		}
+		b.WriteString("\n")
+	}
+
+	if conventionInfo.AllConventionTools != "" {
+		b.WriteString("项目提交规范:\n")
+		b.WriteString(truncate(conventionInfo.AllConventionTools, 500))
+		b.WriteString("\n")
+	}
+
+	if len(conventionInfo.RecentMessages) > 0 {
+		b.WriteString("参考风格: ")
+		b.WriteString(conventionInfo.RecentMessages[0].Message)
+		b.WriteString("\n")
+	}
+
+	if skillMgr != nil && skillMgr.HasTool("codegraph_search") {
+		b.WriteString("\n【代码图分析工具】\n")
+		b.WriteString("可使用 codegraph_* 工具深入分析代码结构：\n")
+		b.WriteString("- codegraph_search: 按名称搜索符号（函数、类、变量）\n")
+		b.WriteString("- codegraph_explore: 深度探索代码结构和调用关系（推荐首先使用）\n")
+		b.WriteString("- codegraph_callers: 查找调用者（谁调用了这个函数）\n")
+		b.WriteString("- codegraph_callees: 查找被调用者（这个函数调用了谁）\n")
+		b.WriteString("- codegraph_impact: 分析变更影响范围\n")
+		b.WriteString("- codegraph_node: 获取符号详细信息和上下文\n")
+		b.WriteString("适用场景：理解复杂调用链、评估重构影响、搜索代码结构\n")
+	}
+
+	b.WriteString("\n【用户交互工具】\n")
+	b.WriteString("当遇到不确定的决策时，使用 ask_user 工具向用户提问：\n")
+	b.WriteString("- 多种实现方案需要用户选择\n")
+	b.WriteString("- 发现潜在问题但不确定用户意图\n")
+	b.WriteString("- 需要用户确认某个设计决策\n")
+	b.WriteString("- 遇到模糊需求需要澄清\n")
+	b.WriteString("- 提交前确认 commit message（推荐）\n")
+	b.WriteString("工具会弹出交互界面让用户选择或输入，等待用户回答后继续执行。\n")
+
+	b.WriteString("\n【规则】\n")
+	b.WriteString("- diff 内容可能被截断：如果 seen 的 patch 不全，用 read_file 补全关键代码\n")
+	b.WriteString("- 先读代码后判断，不可凭文件名猜测风险\n")
+	b.WriteString("- 审查意见与 commit message 独立，互不影响\n")
+	b.WriteString("- commit message 描述「代码做了什么」（新增/修改/删除功能），而非「代码是否安全」\n")
+	b.WriteString("- 提交前自检：commit message 是否准确反映了代码变更？如果发现是审查结论的改写，重新生成\n")
+	b.WriteString("- 避免在对话中混入无关的长文本，控制每轮输出长度\n")
+	b.WriteString("- tool 结果中已有内容的文件，直接引用，不要重复 read_file\n")
+	b.WriteString("- list_tree 默认 depth=1\n")
+	b.WriteString("- git_commit 是最终目标，必须调用。失败用 amend 修正，最多 3 次\n")
+	b.WriteString("- 不可恢复错误时不重试\n")
+	b.WriteString("- 如果发现项目的重要架构模式、团队约定或易错点，可调用 update_memory 记录（每次会话最多 1 次）\n")
+	b.WriteString("- 提交后输出：\n")
+	b.WriteString("【最终提交信息】\n")
+	b.WriteString("```commit\n")
+	b.WriteString("<type>(<scope>): <subject>\n")
+	b.WriteString("```\n")
+
+	return b.String()
+}
+
+// buildReActSystemPromptCompact ReAct 模式紧凑版系统提示词
+func buildReActSystemPromptCompact(conventionInfo git.ConventionInfo, scopeHints []string, memoryContent string, skillMgr *skill.Manager) string {
+	var b strings.Builder
+	b.WriteString("你是代码审查助手，使用 ReAct 模式工作。已在理解阶段阅读了代码，现在可以自由使用所有工具完成审查和提交。\n")
+
+	if memoryContent != "" {
+		b.WriteString("项目记忆: " + truncate(memoryContent, 400) + "\n")
+	}
+
+	b.WriteString("审查维度：正确性、安全性、性能、错误处理、设计、测试、可维护性、一致性\n")
+	b.WriteString("简单变更（注释/单行修复/配置微调）可设 is_simple=true 跳过详细审查。\n")
+	b.WriteString("先读代码再判断，commit message 描述变更本身不是审查结论。\n")
+	b.WriteString("diff 可能被截断，用 read_file 补全。控制输出长度节约 token。\n\n")
+	b.WriteString("Git 工具: 可自由使用 git_status/log/branch/diff_unstaged/add/restore/stash/blame/tag\n")
+	b.WriteString("步骤: 分析风险 → read_file(需要时) → report_review(必须) → ask_user 确认 message → git_commit(必须)\n")
+	b.WriteString("⚠️ 必须调用 git_commit 完成提交，仅调用 report_review 不算完成任务。\n")
+	b.WriteString("Commit 格式: <type>(<scope>): <subject>\n")
+	b.WriteString("type: feat|fix|docs|style|refactor|perf|test|build|ci|chore|revert\n")
+	b.WriteString("subject 必须具体描述改了什么（至少 20 个字符），禁止使用「提交变更」「添加功能」「修复问题」等泛化表述。\n")
+	b.WriteString("好的例子: feat(auth): 添加 OAuth2 登录支持，集成第三方认证服务 / fix(api): 修复分页查询返回空结果的问题，添加默认值处理\n")
+
+	if len(scopeHints) > 0 {
+		b.WriteString("推荐 scope: " + strings.Join(scopeHints[:minInt(3, len(scopeHints))], ", ") + "\n")
+	}
+
+	if conventionInfo.AllConventionTools != "" {
+		b.WriteString("规范:\n" + truncate(conventionInfo.AllConventionTools, 300) + "\n")
+	}
+
+	if skillMgr != nil && skillMgr.HasTool("codegraph_search") {
+		b.WriteString("代码图工具: codegraph_search/explore/callers/callees/impact/node 可用于深入分析代码结构和调用关系\n")
+	}
+
+	b.WriteString("用户交互: 遇到不确定决策或提交前用 ask_user 向用户提问确认\n")
+	b.WriteString("规则: 读代码再判断; commit 描述变更本身; git_commit 是目标; 失败用 amend; 发现重要模式可 update_memory(最多1次)\n")
+
+	return b.String()
+}
+
+// buildReActUserPrompt 构建 ReAct 模式用户提示词
+func buildReActUserPrompt(diffContent, description string) string {
+	var b strings.Builder
+
+	if description != "" {
+		b.WriteString("项目描述：\n")
+		b.WriteString(description)
+		b.WriteString("\n\n")
+	}
+
+	b.WriteString("代码变更：\n")
+	truncatedDiff := truncate(diffContent, 8000)
+	b.WriteString(truncatedDiff)
+	b.WriteString("\n\n")
+
+	b.WriteString("请分析这些变更，审查风险，并生成合适的 commit message 提交。\n")
+	b.WriteString("使用 ReAct 模式：思考 → 行动（调用工具）→ 观察结果 → 继续思考，直到完成提交。\n")
+
+	return b.String()
+}
+
+// buildReActUserPromptCompact ReAct 模式紧凑版用户提示词
+func buildReActUserPromptCompact(diffContent string) string {
+	var b strings.Builder
+
+	b.WriteString("代码变更：\n")
+	truncatedDiff := truncateCompact(diffContent, 4000)
+	b.WriteString(truncatedDiff)
+	b.WriteString("\n\n")
+
+	b.WriteString("步骤: 分析风险 → read_file(需要时) → report_review → ask_user 确认 → git_commit\n")
 
 	return b.String()
 }

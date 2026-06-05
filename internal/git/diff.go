@@ -23,7 +23,7 @@ func GetDiffOverview() string {
 	statOut, _ := statCmd.Output()
 	stat := strings.TrimSpace(string(statOut))
 	if stat != "" {
-		b.WriteString("变更统计 (diff --stat):\n")
+		b.WriteString("## 变更统计 (diff --stat):\n")
 		b.WriteString(stat)
 		b.WriteString("\n\n")
 	}
@@ -34,8 +34,13 @@ func GetDiffOverview() string {
 	nsOut, _ := nsCmd.Output()
 	ns := strings.TrimSpace(string(nsOut))
 	if ns != "" {
-		b.WriteString("变更文件列表 (diff --name-status):\n")
+		b.WriteString("## 变更文件列表 (diff --name-status):\n")
 		b.WriteString(ns)
+		b.WriteString("\n\n")
+		
+		// Add file type categorization
+		b.WriteString("## 文件类型分析:\n")
+		categorizeFiles(ns, &b)
 		b.WriteString("\n")
 	}
 
@@ -44,6 +49,62 @@ func GetDiffOverview() string {
 	}
 
 	return b.String()
+}
+
+// categorizeFiles analyzes changed files and categorizes them by type
+func categorizeFiles(nameStatus string, b *strings.Builder) {
+	lines := strings.Split(strings.TrimSpace(nameStatus), "\n")
+	
+	var coreFiles, testFiles, configFiles, generatedFiles, docFiles []string
+	
+	for _, line := range lines {
+		parts := strings.Fields(line)
+		if len(parts) < 2 {
+			continue
+		}
+		path := parts[len(parts)-1]
+		
+		// Categorize by file path and name
+		switch {
+		case strings.Contains(path, "_test.go") || strings.Contains(path, "/test/") || strings.Contains(path, "/tests/"):
+			testFiles = append(testFiles, path)
+		case strings.Contains(path, "/config/") || strings.Contains(path, ".yaml") || strings.Contains(path, ".yml") || 
+		     strings.Contains(path, ".json") || strings.Contains(path, ".toml"):
+			configFiles = append(configFiles, path)
+		case strings.Contains(path, "generated") || strings.Contains(path, ".pb.go") || strings.Contains(path, "_gen.go"):
+			generatedFiles = append(generatedFiles, path)
+		case strings.HasSuffix(path, ".md") || strings.HasSuffix(path, ".txt") || strings.Contains(path, "/docs/"):
+			docFiles = append(docFiles, path)
+		default:
+			coreFiles = append(coreFiles, path)
+		}
+	}
+	
+	if len(coreFiles) > 0 {
+		b.WriteString(fmt.Sprintf("- **核心代码** (%d files): %s\n", len(coreFiles), strings.Join(coreFiles[:min(5, len(coreFiles))], ", ")))
+		if len(coreFiles) > 5 {
+			b.WriteString(fmt.Sprintf("  ... 及其他 %d 个核心文件\n", len(coreFiles)-5))
+		}
+	}
+	if len(testFiles) > 0 {
+		b.WriteString(fmt.Sprintf("- **测试文件** (%d files): %s\n", len(testFiles), strings.Join(testFiles[:min(3, len(testFiles))], ", ")))
+	}
+	if len(configFiles) > 0 {
+		b.WriteString(fmt.Sprintf("- **配置文件** (%d files): %s\n", len(configFiles), strings.Join(configFiles[:min(3, len(configFiles))], ", ")))
+	}
+	if len(generatedFiles) > 0 {
+		b.WriteString(fmt.Sprintf("- **生成代码** (%d files): 可跳过\n", len(generatedFiles)))
+	}
+	if len(docFiles) > 0 {
+		b.WriteString(fmt.Sprintf("- **文档** (%d files): %s\n", len(docFiles), strings.Join(docFiles[:min(3, len(docFiles))], ", ")))
+	}
+}
+
+func min(a, b int) int {
+	if a < b {
+		return a
+	}
+	return b
 }
 
 // GetFileDiff returns the diff for a single file (staged changes).

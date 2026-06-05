@@ -30,17 +30,19 @@ go test -v ./internal/diff/ -run TestParseNumStat
 - `internal/memory/` - Project memory persistence (`.git/ai-memory`)
 - `internal/logger/` - Structured logging to `~/.config/ai-commit/logs/`
 
-**AI tool flow**: User selects files → stage → AI calls tools freely (diff_overview, read_file, git_status, git_log, report_review, ask_user, git_commit, etc.) → commit → verify
+**AI tool flow**: User selects files → stage → AI uses ReAct loop (Thought → Action → Observation) with all available tools (diff_overview, read_file, git_status, git_log, report_review, ask_user, git_commit, etc.) → commit → verify
+
+**ReAct Agent pattern**: AI operates in a continuous loop: (1) Think about current state, (2) Call tools to gather information or take action, (3) Observe results, (4) Repeat until commit succeeds or user cancels. Tool errors are fed back to AI for autonomous error handling.
 
 **Git as a tool**: AI has free access to all Git operations (status/log/branch/stash/add/restore/diff/blame/tag). No rigid execution order. AI uses `ask_user` to confirm commit message before calling `git_commit`.
-
-**Phase 2 mandatory commit**: The Phase 2 (审查提交) system prompt explicitly requires the AI to call `git_commit`. The prompt states "必须调用 git_commit 完成提交，仅调用 report_review 不算完成任务" to prevent the AI from finishing early without committing.
 
 **Commit message quality**: The prompt enforces specific, meaningful commit messages. Generic subjects like "提交变更", "添加功能", "修复问题" are explicitly forbidden. The AI must describe what was actually changed (e.g., "feat(auth): 添加 OAuth2 登录支持").
 
 ## Critical patterns
 
 **Diff degradation**: Auto-selects strategy by byte count (full → compact summary sorted by change size → file list + on-demand `read_diff`)
+
+**Large change handling**: Enhanced diff_overview tool provides file type categorization (core/test/config/generated/docs) to help AI prioritize. System prompt includes 4-step strategy: (1) global scan, (2) priority ranking, (3) deep reading with context, (4) cross-file impact analysis. Initial diff limits increased to 8000 chars (normal) / 4000 chars (compact) for better context.
 
 **Token management**: Estimates tokens at startup; >85% context window triggers compact mode (aggressive truncation + shorter prompt). Conversation history auto-compresses in-memory after each round (keeps last 3 tool results, discards older read_file/list_tree/diff_overview results) to prevent OOM on long sessions.
 
