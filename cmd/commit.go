@@ -1,6 +1,7 @@
 package cmd
 
 import (
+	"context"
 	"fmt"
 	"os/exec"
 	"strings"
@@ -13,6 +14,7 @@ import (
 	"github.com/oliver/git-ai-commit/internal/diff"
 	"github.com/oliver/git-ai-commit/internal/logger"
 	"github.com/oliver/git-ai-commit/internal/project"
+	"github.com/oliver/git-ai-commit/internal/skill"
 	"github.com/oliver/git-ai-commit/tui"
 )
 
@@ -79,6 +81,17 @@ func RunCommit(opts CommitOptions) error {
 		return fmt.Errorf("初始化 AI 客户端失败：%w", err)
 	}
 
+	fmt.Println("🔧 加载 Skills...")
+	skillMgr := skill.NewManager()
+	skillsDir := skill.GetSkillsDir()
+	if err := skillMgr.Discover(context.Background(), skillsDir); err != nil {
+		logger.Warn("发现 Skills 失败: %v", err)
+	}
+	defer skillMgr.Shutdown()
+	if len(skillMgr.SkillNames()) > 0 {
+		fmt.Printf("   已加载 Skills: %s\n", strings.Join(skillMgr.SkillNames(), ", "))
+	}
+
 	// --continue 模式：加载上次会话
 	var continueSession *ai.PersistableSession
 	if opts.Continue {
@@ -117,6 +130,7 @@ func RunCommit(opts CommitOptions) error {
 		GitRoot:         gitRoot,
 		Client:          client,
 		ContinueSession: continueSession,
+		SkillManager:    skillMgr,
 	})
 	if err != nil {
 		logger.Error("TUI 运行失败: %v", err)

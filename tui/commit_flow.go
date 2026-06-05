@@ -14,6 +14,7 @@ import (
 	"github.com/oliver/git-ai-commit/internal/diff"
 	"github.com/oliver/git-ai-commit/internal/git"
 	"github.com/oliver/git-ai-commit/internal/logger"
+	"github.com/oliver/git-ai-commit/internal/skill"
 )
 
 type phase int
@@ -50,6 +51,7 @@ type CommitFlowOptions struct {
 	GitRoot         string
 	Client          *ai.Client
 	ContinueSession *ai.PersistableSession
+	SkillManager    *skill.Manager
 }
 
 // CommitFlowResult is returned after the flow completes.
@@ -459,9 +461,9 @@ func (m *CommitFlowModel) startGenerateCmd() tea.Cmd {
 	var sess *ai.CommitSession
 	var err error
 	if m.continueSess != nil {
-		sess, err = m.opts.Client.ContinueCommitSession(m.continueSess, m.stagedDiff, conventionInfo, m.selectedFiles)
+		sess, err = m.opts.Client.ContinueCommitSession(m.continueSess, m.stagedDiff, conventionInfo, m.selectedFiles, m.opts.SkillManager)
 	} else {
-		sess, err = m.opts.Client.StartCommitSession(m.stagedDiff, m.opts.DescFunc(), conventionInfo, 3, m.selectedFiles)
+		sess, err = m.opts.Client.StartCommitSession(m.stagedDiff, m.opts.DescFunc(), conventionInfo, 3, m.selectedFiles, m.opts.SkillManager)
 	}
 	if err != nil {
 		logger.Error("创建 AI session 失败: %v", err)

@@ -15,6 +15,7 @@ import (
 	"github.com/oliver/git-ai-commit/internal/git"
 	"github.com/oliver/git-ai-commit/internal/logger"
 	"github.com/oliver/git-ai-commit/internal/memory"
+	"github.com/oliver/git-ai-commit/internal/skill"
 	openai "github.com/sashabaranov/go-openai"
 )
 
@@ -179,6 +180,8 @@ type CommitSession struct {
 	phase2SystemPrompt string
 	// 审查结果
 	ReviewResult *ReviewResult
+	// Skill 系统
+	skillManager *skill.Manager
 }
 
 type ReviewResult struct {
@@ -219,7 +222,7 @@ type CommitResult struct {
 // StartCommitSession 启动两阶段提交会话。
 // Phase 1（理解阶段）：AI 阅读代码变更，输出结构化理解，调用 summarize_changes 进入 Phase 2。
 // Phase 2（审查提交阶段）：AI 基于已有理解进行审查并提交。
-func (c *Client) StartCommitSession(diffContent, description string, conventionInfo git.ConventionInfo, maxRetries int, selectedFiles []string) (*CommitSession, error) {
+func (c *Client) StartCommitSession(diffContent, description string, conventionInfo git.ConventionInfo, maxRetries int, selectedFiles []string, skillMgr *skill.Manager) (*CommitSession, error) {
 	scopeHints := inferScopeHints(selectedFiles)
 
 	memoryContent, _ := memory.Read()
@@ -240,15 +243,20 @@ func (c *Client) StartCommitSession(diffContent, description string, conventionI
 		{Role: openai.ChatMessageRoleUser, Content: userPrompt},
 	}
 
-	phase2Prompt := buildAuthSystemPrompt(conventionInfo, scopeHints, memoryContent)
+	phase2Prompt := buildAuthSystemPrompt(conventionInfo, scopeHints, memoryContent, skillMgr)
 	if compactMode {
-		phase2Prompt = buildAuthSystemPromptCompact(conventionInfo, scopeHints, memoryContent)
+		phase2Prompt = buildAuthSystemPromptCompact(conventionInfo, scopeHints, memoryContent, skillMgr)
+	}
+
+	tools := buildOpenAITools()
+	if skillMgr != nil {
+		tools = append(tools, convertSkillTools(skillMgr.AllTools())...)
 	}
 
 	sess := &CommitSession{
 		client:               c,
 		messages:             messages,
-		tools:                buildOpenAITools(),
+		tools:                tools,
 		maxRetries:           maxRetries,
 		maxLoops:             100,
 		maxReadFileCalls:     dynReadFileLimit(len(selectedFiles)),
@@ -259,14 +267,15 @@ func (c *Client) StartCommitSession(diffContent, description string, conventionI
 		readFiles:            make(map[string]bool),
 		phase:                PhaseUnderstand,
 		phase2SystemPrompt:   phase2Prompt,
+		skillManager:         skillMgr,
 	}
 
-	logger.Info("AI session started model=%s compactMode=%v selectedFiles=%d estimatedTokens=%d memoryLen=%d", c.config.Model, compactMode, len(selectedFiles), estimatedTokens, len(memoryContent))
+	logger.Info("AI session started model=%s compactMode=%v selectedFiles=%d estimatedTokens=%d memoryLen=%d skills=%d", c.config.Model, compactMode, len(selectedFiles), estimatedTokens, len(memoryContent), len(skillMgr.SkillNames()))
 	return sess, nil
 }
 
 // ContinueCommitSession 从持久化会话继续，直接进入 Phase 2（审查提交阶段）。
-func (c *Client) ContinueCommitSession(ps *PersistableSession, diffContent string, conventionInfo git.ConventionInfo, selectedFiles []string) (*CommitSession, error) {
+func (c *Client) ContinueCommitSession(ps *PersistableSession, diffContent string, conventionInfo git.ConventionInfo, selectedFiles []string, skillMgr *skill.Manager) (*CommitSession, error) {
 	messages := make([]openai.ChatCompletionMessage, len(ps.Messages))
 	copy(messages, ps.Messages)
 
@@ -279,9 +288,9 @@ func (c *Client) ContinueCommitSession(ps *PersistableSession, diffContent strin
 	memoryContent, _ := memory.Read()
 
 	scopeHints := inferScopeHints(selectedFiles)
-	systemPrompt := buildAuthSystemPrompt(conventionInfo, scopeHints, memoryContent)
+	systemPrompt := buildAuthSystemPrompt(conventionInfo, scopeHints, memoryContent, skillMgr)
 	if ps.CompactMode {
-		systemPrompt = buildAuthSystemPromptCompact(conventionInfo, scopeHints, memoryContent)
+		systemPrompt = buildAuthSystemPromptCompact(conventionInfo, scopeHints, memoryContent, skillMgr)
 	}
 	if len(messages) > 0 && messages[0].Role == openai.ChatMessageRoleSystem {
 		messages[0].Content = systemPrompt
@@ -289,10 +298,15 @@ func (c *Client) ContinueCommitSession(ps *PersistableSession, diffContent strin
 		messages = append([]openai.ChatCompletionMessage{{Role: openai.ChatMessageRoleSystem, Content: systemPrompt}}, messages...)
 	}
 
+	tools := buildOpenAITools()
+	if skillMgr != nil {
+		tools = append(tools, convertSkillTools(skillMgr.AllTools())...)
+	}
+
 	sess := &CommitSession{
 		client:               c,
 		messages:             messages,
-		tools:                buildOpenAITools(),
+		tools:                tools,
 		maxRetries:           3,
 		maxLoops:             100,
 		maxReadFileCalls:     dynReadFileLimit(len(selectedFiles)),
@@ -302,6 +316,7 @@ func (c *Client) ContinueCommitSession(ps *PersistableSession, diffContent strin
 		toolCache:            make(map[string]string),
 		readFiles:            make(map[string]bool),
 		phase:                PhaseCommit,
+		skillManager:         skillMgr,
 	}
 
 	return sess, nil
@@ -967,6 +982,23 @@ func (s *CommitSession) executeToolCallWithLimit(name, argsJSON string) string {
 		s.mu.Unlock()
 	}
 
+	// Check if it's a skill tool
+	if s.skillManager != nil && s.skillManager.HasTool(name) {
+		var args map[string]interface{}
+		if err := json.Unmarshal(json.RawMessage(argsJSON), &args); err != nil {
+			return fmt.Sprintf("ERROR: 解析参数失败：%v", err)
+		}
+		result, err := s.skillManager.CallTool(context.Background(), name, args)
+		if err != nil {
+			logger.Error("skill tool %s 调用失败: %v", name, err)
+			return fmt.Sprintf("ERROR: %v", err)
+		}
+		s.mu.Lock()
+		s.toolCache[cacheKey] = result
+		s.mu.Unlock()
+		return result
+	}
+
 	result := executeToolCall(name, argsJSON)
 
 	if name != "git_commit" && name != "git_commit_amend" {
@@ -1110,6 +1142,21 @@ func buildOpenAITools() []openai.Tool {
 	return tools
 }
 
+func convertSkillTools(skillTools []skill.ToolDefinition) []openai.Tool {
+	var tools []openai.Tool
+	for _, td := range skillTools {
+		tools = append(tools, openai.Tool{
+			Type: openai.ToolTypeFunction,
+			Function: &openai.FunctionDefinition{
+				Name:        td.Name,
+				Description: td.Description,
+				Parameters:  td.InputSchema,
+			},
+		})
+	}
+	return tools
+}
+
 func buildGenerateSystemPrompt(conventionInfo git.ConventionInfo) string {
 	var b strings.Builder
 	b.WriteString("你是 Git commit 生成助手。根据代码变更生成 Conventional Commits 消息，直接返回文本，不调用工具。\n\n")
@@ -1161,7 +1208,7 @@ func buildGeneratePrompt(diffContent, description string) string {
 }
 
 // buildAuthSystemPrompt 构建 Phase 2（审查提交阶段）系统提示词
-func buildAuthSystemPrompt(conventionInfo git.ConventionInfo, scopeHints []string, memoryContent string) string {
+func buildAuthSystemPrompt(conventionInfo git.ConventionInfo, scopeHints []string, memoryContent string, skillMgr *skill.Manager) string {
 	var b strings.Builder
 	b.WriteString("你是资深代码审查助手。工作流程：审查风险 → report_review → 提交。\n\n")
 	b.WriteString("你已在理解阶段阅读了代码，当前对话中已包含对变更的结构化理解。\n")
@@ -1233,6 +1280,17 @@ func buildAuthSystemPrompt(conventionInfo git.ConventionInfo, scopeHints []strin
 		b.WriteString("\n")
 	}
 
+	if skillMgr != nil && skillMgr.HasTool("codegraph_find_symbol") {
+		b.WriteString("\n【代码图分析工具】\n")
+		b.WriteString("可使用 codegraph_* 工具深入分析代码结构：\n")
+		b.WriteString("- codegraph_find_symbol: 查找符号定义（函数、类、变量）\n")
+		b.WriteString("- codegraph_find_callers: 查找调用者（谁调用了这个函数）\n")
+		b.WriteString("- codegraph_find_callees: 查找被调用者（这个函数调用了谁）\n")
+		b.WriteString("- codegraph_find_impact: 分析变更影响范围\n")
+		b.WriteString("- codegraph_class_hierarchy: 查看类继承关系\n")
+		b.WriteString("适用场景：理解复杂调用链、评估重构影响、识别循环依赖\n")
+	}
+
 	b.WriteString("\n【规则】\n")
 	b.WriteString("- diff 内容可能被截断：如果 seen 的 patch 不全，用 read_file 补全关键代码\n")
 	b.WriteString("- 先读代码后判断，不可凭文件名猜测风险\n")
@@ -1255,7 +1313,7 @@ func buildAuthSystemPrompt(conventionInfo git.ConventionInfo, scopeHints []strin
 	return b.String()
 }
 
-func buildAuthSystemPromptCompact(conventionInfo git.ConventionInfo, scopeHints []string, memoryContent string) string {
+func buildAuthSystemPromptCompact(conventionInfo git.ConventionInfo, scopeHints []string, memoryContent string, skillMgr *skill.Manager) string {
 	var b strings.Builder
 	b.WriteString("你是代码审查助手。工作流程：审查风险 → report_review → 提交。\n")
 	b.WriteString("已在理解阶段阅读了代码，直接进入审查和提交。\n")
@@ -1278,6 +1336,10 @@ func buildAuthSystemPromptCompact(conventionInfo git.ConventionInfo, scopeHints 
 
 	if conventionInfo.AllConventionTools != "" {
 		b.WriteString("规范:\n" + truncate(conventionInfo.AllConventionTools, 300) + "\n")
+	}
+
+	if skillMgr != nil && skillMgr.HasTool("codegraph_find_symbol") {
+		b.WriteString("代码图工具: codegraph_find_symbol/find_callers/find_callees/find_impact/class_hierarchy 可用于深入分析代码结构和调用关系\n")
 	}
 
 	b.WriteString("规则: 读代码再判断; report_review 在 git_commit 前; commit 描述变更本身; git_commit 是目标; 失败用 amend; 发现重要模式可 update_memory(最多1次)\n")

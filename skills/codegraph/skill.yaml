@@ -1,0 +1,15 @@
+name: codegraph
+version: 1.0.0
+description: CodeGraphContext - 代码图分析工具，提供函数调用关系、影响范围等查询
+transport: stdio
+command: codegraphcontext
+args:
+  - mcp
+  - --stdio
+env: {}
+tools:
+  - codegraph_find_symbol
+  - codegraph_find_callers
+  - codegraph_find_callees
+  - codegraph_find_impact
+  - codegraph_class_hierarchy
