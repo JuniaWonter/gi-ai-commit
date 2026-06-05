@@ -9,6 +9,7 @@ import (
 	"strings"
 	"time"
 
+	"github.com/oliver/git-ai-commit/internal/logger"
 	openai "github.com/sashabaranov/go-openai"
 )
 
@@ -18,13 +19,13 @@ const sessionVersion = 1
 
 // PersistableSession 可持久化的会话状态
 type PersistableSession struct {
-	Version     int                          `json:"version"`
-	Model       string                       `json:"model"`
-	Branch      string                       `json:"branch"`
-	LastHash    string                       `json:"last_commit_hash,omitempty"`
-	CompactMode bool                         `json:"compact_mode"`
+	Version     int                            `json:"version"`
+	Model       string                         `json:"model"`
+	Branch      string                         `json:"branch"`
+	LastHash    string                         `json:"last_commit_hash,omitempty"`
+	CompactMode bool                           `json:"compact_mode"`
 	Messages    []openai.ChatCompletionMessage `json:"messages"`
-	CreatedAt   time.Time                    `json:"created_at"`
+	CreatedAt   time.Time                      `json:"created_at"`
 }
 
 // sessionPath 返回会话文件路径 (.git/ai-session.json)
@@ -62,6 +63,7 @@ func lastCommitHash() string {
 func (s *CommitSession) SaveSession() error {
 	path, err := sessionPath()
 	if err != nil {
+		logger.Warn("获取 session 路径失败: %v", err)
 		return err
 	}
 
@@ -74,18 +76,20 @@ func (s *CommitSession) SaveSession() error {
 		CreatedAt:   time.Now(),
 	}
 
-	// 保存时压缩消息，丢弃过期的工具结果
 	compacted := compressMessagesForSave(sess.Messages)
 	sess.Messages = compacted
 
 	data, err := json.MarshalIndent(sess, "", "  ")
 	if err != nil {
+		logger.Error("序列化会话失败: %v", err)
 		return fmt.Errorf("序列化会话失败：%w", err)
 	}
 
 	if err := os.WriteFile(path, data, 0600); err != nil {
+		logger.Error("写入会话文件失败: %v", err)
 		return fmt.Errorf("写入会话文件失败：%w", err)
 	}
+	logger.Info("会话已保存 path=%s messages=%d", path, len(compacted))
 	return nil
 }
 
@@ -93,43 +97,48 @@ func (s *CommitSession) SaveSession() error {
 func LoadSession(modelName string) (*PersistableSession, error) {
 	path, err := sessionPath()
 	if err != nil {
+		logger.Warn("获取 session 路径失败: %v", err)
 		return nil, err
 	}
 
 	data, err := os.ReadFile(path)
 	if err != nil {
 		if os.IsNotExist(err) {
+			logger.Info("未找到之前的会话: %s", path)
 			return nil, fmt.Errorf("没有找到之前的会话（%s）", path)
 		}
+		logger.Error("读取会话文件失败: %v", err)
 		return nil, fmt.Errorf("读取会话文件失败：%w", err)
 	}
 
 	var sess PersistableSession
 	if err := json.Unmarshal(data, &sess); err != nil {
+		logger.Error("解析会话文件失败: %v", err)
 		return nil, fmt.Errorf("解析会话文件失败：%w", err)
 	}
 
-	// 版本检查
 	if sess.Version != sessionVersion {
+		logger.Warn("会话版本不兼容: file=%d expected=%d", sess.Version, sessionVersion)
 		return nil, fmt.Errorf("会话版本不兼容（文件: %d, 期望: %d），请重新开始", sess.Version, sessionVersion)
 	}
 
-	// 过期检查
 	if time.Since(sess.CreatedAt) > sessionMaxAge {
+		logger.Warn("会话已过期: age=%v", time.Since(sess.CreatedAt))
 		return nil, fmt.Errorf("会话已过期（超过 %d 小时），请重新开始", 7*24)
 	}
 
-	// 分支检查
 	current := currentBranch()
 	if sess.Branch != "" && sess.Branch != current {
+		logger.Warn("分支不匹配: session=%s current=%s", sess.Branch, current)
 		return nil, fmt.Errorf("分支不匹配（会话: %s, 当前: %s），请重新开始", sess.Branch, current)
 	}
 
-	// 模型检查
 	if sess.Model != "" && sess.Model != modelName {
+		logger.Warn("模型不匹配: session=%s current=%s", sess.Model, modelName)
 		return nil, fmt.Errorf("模型不匹配（会话: %s, 当前: %s），请重新开始", sess.Model, modelName)
 	}
 
+	logger.Info("会话已加载 path=%s model=%s branch=%s messages=%d", path, sess.Model, sess.Branch, len(sess.Messages))
 	return &sess, nil
 }
 

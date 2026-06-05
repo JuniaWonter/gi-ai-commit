@@ -13,10 +13,10 @@ const (
 )
 
 type ClassifiedError struct {
-	Category    ErrorCategory
-	Message     string
-	Suggestion  string
-	RawStderr   string
+	Category   ErrorCategory
+	Message    string
+	Suggestion string
+	RawStderr  string
 }
 
 func ClassifyCommitError(stderr string) ClassifiedError {

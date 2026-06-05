@@ -15,25 +15,25 @@ import (
 
 var (
 	selectedStyle = lipgloss.NewStyle().
-		Bold(true).
-		Foreground(lipgloss.Color("205")).
-		Padding(0, 1)
+			Bold(true).
+			Foreground(lipgloss.Color("205")).
+			Padding(0, 1)
 
 	normalStyle = lipgloss.NewStyle().
-		Foreground(lipgloss.Color("241")).
-		Padding(0, 1)
+			Foreground(lipgloss.Color("241")).
+			Padding(0, 1)
 
 	cursorStyle = lipgloss.NewStyle().
-		Foreground(lipgloss.Color("205"))
+			Foreground(lipgloss.Color("205"))
 
 	addedLineStyle = lipgloss.NewStyle().
 			Foreground(lipgloss.Color("2"))
 
 	removedLineStyle = lipgloss.NewStyle().
-			Foreground(lipgloss.Color("1"))
+				Foreground(lipgloss.Color("1"))
 
 	contextLineStyle = lipgloss.NewStyle().
-			Foreground(lipgloss.Color("241"))
+				Foreground(lipgloss.Color("241"))
 
 	hunkHeaderStyle = lipgloss.NewStyle().
 			Foreground(lipgloss.Color("6")).Bold(true)
@@ -42,10 +42,10 @@ var (
 			Foreground(lipgloss.Color("6")).Bold(true)
 
 	diffTitleBarStyle = lipgloss.NewStyle().
-			Bold(true).
-			Foreground(lipgloss.Color("63")).
-			Background(lipgloss.Color("235")).
-			Padding(0, 2)
+				Bold(true).
+				Foreground(lipgloss.Color("63")).
+				Background(lipgloss.Color("235")).
+				Padding(0, 2)
 
 	diffHelpStyle = lipgloss.NewStyle().
 			Foreground(lipgloss.Color("241")).
@@ -59,13 +59,13 @@ var (
 			Padding(0, 1)
 
 	splitLabelAddedStyle = lipgloss.NewStyle().
-			Bold(true).
-			Foreground(lipgloss.Color("2")).
-			Background(lipgloss.Color("235")).
-			Padding(0, 1)
+				Bold(true).
+				Foreground(lipgloss.Color("2")).
+				Background(lipgloss.Color("235")).
+				Padding(0, 1)
 
 	splitSeparatorStyle = lipgloss.NewStyle().
-			Foreground(lipgloss.Color("63"))
+				Foreground(lipgloss.Color("63"))
 
 	lineNumStyle = lipgloss.NewStyle().
 			Foreground(lipgloss.Color("241"))
@@ -74,7 +74,7 @@ var (
 			Foreground(lipgloss.Color("2"))
 
 	statRemovedStyle = lipgloss.NewStyle().
-			Foreground(lipgloss.Color("1"))
+				Foreground(lipgloss.Color("1"))
 
 	statFileStyle = lipgloss.NewStyle().
 			Foreground(lipgloss.Color("6"))
@@ -84,24 +84,24 @@ var (
 			Foreground(lipgloss.Color("63"))
 
 	indicatorAddedStyle = lipgloss.NewStyle().
-			Background(lipgloss.Color("2"))
+				Background(lipgloss.Color("2"))
 
 	indicatorRemovedStyle = lipgloss.NewStyle().
-			Background(lipgloss.Color("1"))
+				Background(lipgloss.Color("1"))
 
 	indicatorContextStyle = lipgloss.NewStyle().
-			Background(lipgloss.Color("238"))
+				Background(lipgloss.Color("238"))
 
 	indicatorHunkStyle = lipgloss.NewStyle().
-			Background(lipgloss.Color("6"))
+				Background(lipgloss.Color("6"))
 )
 
 type diffLoadedMsg struct {
-	content   string
-	rawDiff   string
-	path      string
-	err       error
-	ignoreWS  bool
+	content  string
+	rawDiff  string
+	path     string
+	err      error
+	ignoreWS bool
 }
 
 type gitignoreAddedMsg struct {
@@ -115,32 +115,32 @@ type filesRefreshedMsg struct {
 }
 
 type FileSelector struct {
-	files       []diff.FileChange
-	cursor      int
-	selected    map[int]bool
-	quitting    bool
-	done        bool
-	showDiff    bool
-	splitView   bool
-	hideContext bool
-	showLineNum bool
-	ignoreWS    bool
-	showStat    bool
-	viewport    viewport.Model
-	leftVP      viewport.Model
-	rightVP     viewport.Model
-	ready       bool
-	diffLoading bool
-	termWidth   int
-	termHeight  int
-	diffPath    string
-	rawDiff     string
-	totalLines  int
-	addedLines  int
-	removedLines int
+	files         []diff.FileChange
+	cursor        int
+	selected      map[int]bool
+	quitting      bool
+	done          bool
+	showDiff      bool
+	splitView     bool
+	hideContext   bool
+	showLineNum   bool
+	ignoreWS      bool
+	showStat      bool
+	viewport      viewport.Model
+	leftVP        viewport.Model
+	rightVP       viewport.Model
+	ready         bool
+	diffLoading   bool
+	termWidth     int
+	termHeight    int
+	diffPath      string
+	rawDiff       string
+	totalLines    int
+	addedLines    int
+	removedLines  int
 	hunkPositions []int
-	lineTypes   []string
-	gitignoreMsg string
+	lineTypes     []string
+	gitignoreMsg  string
 }
 
 func NewFileSelector(files []diff.FileChange) *FileSelector {
@@ -164,7 +164,7 @@ func (f *FileSelector) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		if !f.ready {
 			f.viewport = viewport.New(msg.Width, msg.Height-3)
 			f.viewport.Style = lipgloss.NewStyle()
-			halfW := msg.Width / 2 - 2
+			halfW := msg.Width/2 - 2
 			f.leftVP = viewport.New(halfW, msg.Height-5)
 			f.leftVP.Style = lipgloss.NewStyle()
 			f.rightVP = viewport.New(halfW, msg.Height-5)
@@ -173,7 +173,7 @@ func (f *FileSelector) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		} else {
 			f.viewport.Width = msg.Width
 			f.viewport.Height = msg.Height - 3
-			halfW := msg.Width / 2 - 2
+			halfW := msg.Width/2 - 2
 			f.leftVP.Width = halfW
 			f.leftVP.Height = msg.Height - 5
 			f.rightVP.Width = halfW
@@ -194,7 +194,7 @@ func (f *FileSelector) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			}
 			f.viewport = viewport.New(w, h-3)
 			f.viewport.Style = lipgloss.NewStyle()
-			halfW := w / 2 - 2
+			halfW := w/2 - 2
 			f.leftVP = viewport.New(halfW, h-5)
 			f.leftVP.Style = lipgloss.NewStyle()
 			f.rightVP = viewport.New(halfW, h-5)
@@ -297,7 +297,7 @@ func (f *FileSelector) refreshDiffView() {
 	if !f.ready {
 		f.viewport = viewport.New(w, h-3)
 		f.viewport.Style = lipgloss.NewStyle()
-		halfW := w / 2 - 2
+		halfW := w/2 - 2
 		f.leftVP = viewport.New(halfW, h-5)
 		f.leftVP.Style = lipgloss.NewStyle()
 		f.rightVP = viewport.New(halfW, h-5)
@@ -309,7 +309,7 @@ func (f *FileSelector) refreshDiffView() {
 	f.viewport.SetContent(content)
 	f.viewport.YOffset = 0
 	leftContent, rightContent := f.renderDiffSideBySideContent(f.rawDiff)
-	halfW := w / 2 - 2
+	halfW := w/2 - 2
 	f.leftVP.Width = halfW
 	f.leftVP.Height = h - 5
 	f.leftVP.SetContent(leftContent)
@@ -940,7 +940,7 @@ func (f *FileSelector) renderDiffView() string {
 
 func (f *FileSelector) renderSplitView() string {
 	sep := splitSeparatorStyle.Render("│")
-	halfW := f.termWidth / 2 - 1
+	halfW := f.termWidth/2 - 1
 
 	f.leftVP.Width = halfW
 	f.leftVP.Height = f.termHeight - 5

@@ -138,7 +138,7 @@ func (p *DiffProcessor) buildPayloadsFromDiff(fullDiff string, files []string) (
 			contentCompact = dirIndex + "\n\n" + contentCompact
 		}
 		payloads = append(payloads, DiffPayload{
-			Mode: "压缩摘要",
+			Mode:    "压缩摘要",
 			Content: contentCompact,
 		})
 		return payloads, nil
@@ -157,7 +157,7 @@ func (p *DiffProcessor) buildPayloadsFromDiff(fullDiff string, files []string) (
 		contentFile = dirIndex + "\n\n" + contentFile
 	}
 	payloads = append(payloads, DiffPayload{
-		Mode: "文件级摘要",
+		Mode:    "文件级摘要",
 		Content: contentFile,
 	})
 

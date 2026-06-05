@@ -118,7 +118,7 @@ var ToolDefinitions = []ToolDefinition{
 	},
 	{
 		Name:        "report_review",
-		Description: "输出结构化审查结果。在读代码完成分析后，用此工具提交审查意见，包含变更摘要和风险列表。无风险时 has_risk=false 即可。",
+		Description: "【必须调用】在 git_commit 之前输出结构化审查结果。包含变更摘要、风险列表和审查建议。对于极为简单的变更（如纯注释、单行修复），可设置 is_simple=true 跳过详细审查。",
 		Parameters: json.RawMessage(`{
 			"type": "object",
 			"properties": {
@@ -130,6 +130,24 @@ var ToolDefinitions = []ToolDefinition{
 					"type": "boolean",
 					"description": "是否存在需要关注的风险"
 				},
+				"is_simple": {
+					"type": "boolean",
+					"description": "变更是否极为简单（如纯注释、单行修复、配置微调），可跳过详细审查"
+				},
+				"recommendation": {
+					"type": "string",
+					"enum": ["approve", "approve_with_warnings", "request_changes"],
+					"description": "审查建议：approve=无风险可提交, approve_with_warnings=有警告但可提交, request_changes=有严重问题需修改"
+				},
+				"highlights": {
+					"type": "array",
+					"items": { "type": "string" },
+					"description": "值得肯定的设计决策或代码亮点（可选）"
+				},
+				"breaking_changes": {
+					"type": "boolean",
+					"description": "是否包含破坏性变更（API 变更、接口不兼容等）"
+				},
 				"risks": {
 					"type": "array",
 					"items": {
@@ -137,11 +155,11 @@ var ToolDefinitions = []ToolDefinition{
 						"properties": {
 							"severity": {
 								"type": "string",
-								"enum": ["high", "medium", "low"]
+								"enum": ["critical", "high", "medium", "low"]
 							},
 							"category": {
 								"type": "string",
-								"enum": ["logic", "security", "performance", "error_handling", "maintainability"]
+								"enum": ["correctness", "security", "performance", "error_handling", "design", "testing", "maintainability", "consistency"]
 							},
 							"file": { "type": "string", "description": "风险文件路径" },
 							"line": { "type": "number", "description": "风险所在行号" },
@@ -152,7 +170,7 @@ var ToolDefinitions = []ToolDefinition{
 					}
 				}
 			},
-			"required": ["summary", "has_risk"]
+			"required": ["summary", "has_risk", "recommendation"]
 		}`),
 	},
 	{

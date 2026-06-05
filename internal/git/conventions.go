@@ -9,21 +9,21 @@ import (
 )
 
 type ConventionInfo struct {
-	HookExists           bool
-	HookPath             string
-	HookContent          string
-	HookRules            []string // 从 hook 脚本中提取的可读规则
-	PreCommitHookExists  bool
-	PreCommitHookPath    string
-	PreCommitHookContent string
+	HookExists               bool
+	HookPath                 string
+	HookContent              string
+	HookRules                []string // 从 hook 脚本中提取的可读规则
+	PreCommitHookExists      bool
+	PreCommitHookPath        string
+	PreCommitHookContent     string
 	PrepareCommitHookExists  bool
 	PrepareCommitHookPath    string
 	PrepareCommitHookContent string
-	TemplateExists       bool
-	TemplatePath         string
-	TemplateContent      string
-	RecentMessages       []CommitLogEntry
-	AllConventionTools   string // 所有检测到的规范工具的格式化摘要
+	TemplateExists           bool
+	TemplatePath             string
+	TemplateContent          string
+	RecentMessages           []CommitLogEntry
+	AllConventionTools       string // 所有检测到的规范工具的格式化摘要
 }
 
 type CommitLogEntry struct {

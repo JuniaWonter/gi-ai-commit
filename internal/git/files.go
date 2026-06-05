@@ -40,16 +40,16 @@ var treeIgnoreDirs = map[string]bool{
 }
 
 var treeIgnoreExts = map[string]bool{
-	".png":  true,
-	".jpg":  true,
-	".jpeg": true,
-	".gif":  true,
-	".svg":  true,
-	".ico":  true,
-	".woff": true,
+	".png":   true,
+	".jpg":   true,
+	".jpeg":  true,
+	".gif":   true,
+	".svg":   true,
+	".ico":   true,
+	".woff":  true,
 	".woff2": true,
-	".ttf":  true,
-	".eot":  true,
+	".ttf":   true,
+	".eot":   true,
 }
 
 func GetProjectTree(maxDepth int) string {

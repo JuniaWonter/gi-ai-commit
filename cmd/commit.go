@@ -11,6 +11,7 @@ import (
 	"github.com/oliver/git-ai-commit/internal/debug"
 	"github.com/oliver/git-ai-commit/internal/description"
 	"github.com/oliver/git-ai-commit/internal/diff"
+	"github.com/oliver/git-ai-commit/internal/logger"
 	"github.com/oliver/git-ai-commit/internal/project"
 	"github.com/oliver/git-ai-commit/tui"
 )
@@ -23,15 +24,18 @@ type CommitOptions struct {
 }
 
 func RunCommit(opts CommitOptions) error {
+	logger.Info("RunCommit start autoConfirm=%v dryRun=%v model=%s continue=%v", opts.AutoConfirm, opts.DryRun, opts.Model, opts.Continue)
 	debug.Logf("cmd.RunCommit start autoConfirm=%v dryRun=%v model=%s", opts.AutoConfirm, opts.DryRun, opts.Model)
 	fmt.Println("📊 检查 Git 仓库...")
 	if !isGitRepo() {
+		logger.Error("当前目录不是 Git 仓库")
 		return fmt.Errorf("当前目录不是 Git 仓库")
 	}
 
 	fmt.Println("📊 获取变更文件...")
 	files, err := diff.GetChangedFiles()
 	if err != nil {
+		logger.Error("获取变更文件失败: %v", err)
 		return fmt.Errorf("获取变更文件失败：%w", err)
 	}
 	if len(files) == 0 {
@@ -43,11 +47,13 @@ func RunCommit(opts CommitOptions) error {
 	fmt.Println("⚙️  加载配置...")
 	cfg, err := config.Load()
 	if err != nil {
+		logger.Error("加载配置失败: %v", err)
 		return fmt.Errorf("加载配置失败：%w", err)
 	}
 
 	gitRoot, err := getProjectRoot()
 	if err != nil {
+		logger.Error("获取项目根目录失败: %v", err)
 		return fmt.Errorf("获取项目根目录失败：%w", err)
 	}
 
@@ -58,6 +64,7 @@ func RunCommit(opts CommitOptions) error {
 	}
 	modelCfg, err := cfg.GetModelConfig(modelName)
 	if err != nil {
+		logger.Error("获取模型配置失败: %v", err)
 		return fmt.Errorf("获取模型配置失败：%w", err)
 	}
 	client, err := ai.NewClient(ai.Config{
@@ -68,6 +75,7 @@ func RunCommit(opts CommitOptions) error {
 		ContextWindow: modelCfg.ContextWindow,
 	})
 	if err != nil {
+		logger.Error("初始化 AI 客户端失败: %v", err)
 		return fmt.Errorf("初始化 AI 客户端失败：%w", err)
 	}
 
@@ -77,6 +85,7 @@ func RunCommit(opts CommitOptions) error {
 		fmt.Println("📂 加载上次会话...")
 		loaded, err := ai.LoadSession(modelCfg.Model)
 		if err != nil {
+			logger.Error("加载 continue 会话失败: %v", err)
 			return fmt.Errorf("加载 continue 会话失败：%w", err)
 		}
 		continueSession = loaded
@@ -85,6 +94,7 @@ func RunCommit(opts CommitOptions) error {
 	fmt.Println("📋 检查仓库描述...")
 	descFunc, err := prepareDescription(cfg, client, gitRoot)
 	if err != nil {
+		logger.Warn("处理描述失败: %v", err)
 		return fmt.Errorf("处理描述失败：%w", err)
 	}
 
@@ -109,19 +119,23 @@ func RunCommit(opts CommitOptions) error {
 		ContinueSession: continueSession,
 	})
 	if err != nil {
+		logger.Error("TUI 运行失败: %v", err)
 		return fmt.Errorf("TUI 运行失败：%w", err)
 	}
 	debug.Logf("cmd.RunCommit flow result success=%v selectedFiles=%d commitHash=%s", result.Success, len(result.SelectedFiles), result.CommitHash)
 
 	if !result.Success {
+		logger.Info("用户取消提交")
 		return fmt.Errorf("用户取消提交")
 	}
 
 	fmt.Println("📊 更新计数...")
 	if err := counter.Increment(); err != nil {
+		logger.Warn("更新计数失败: %v", err)
 		return fmt.Errorf("更新计数失败：%w", err)
 	}
 
+	logger.Info("提交成功 commitHash=%s", result.CommitHash)
 	fmt.Println("✅ 提交成功!")
 	if result.CommitHash != "" {
 		fmt.Printf("   Commit: %s\n", result.CommitHash)
@@ -179,11 +193,13 @@ func prepareDescription(cfg *config.Config, client *ai.Client, projRoot string) 
 	go func() {
 		projectInfo, err := project.GetSummary(projRoot)
 		if err != nil {
+			logger.Warn("获取项目摘要失败: %v", err)
 			descCh <- existingDesc
 			return
 		}
 		fileInfo, err := project.GetFileSummary(projRoot, nil)
 		if err != nil {
+			logger.Warn("获取文件摘要失败: %v", err)
 			descCh <- existingDesc
 			return
 		}
@@ -198,10 +214,12 @@ func prepareDescription(cfg *config.Config, client *ai.Client, projRoot string) 
 
 		desc, err := client.GenerateDescription(projectInfo, fileInfo, limitedDiff)
 		if err != nil {
+			logger.Warn("生成仓库描述失败: %v", err)
 			descCh <- existingDesc
 			return
 		}
 		if err := description.Write(desc); err != nil {
+			logger.Warn("写入仓库描述失败: %v", err)
 			descCh <- existingDesc
 			return
 		}

@@ -6,31 +6,34 @@ import (
 
 	tea "github.com/charmbracelet/bubbletea"
 	"github.com/charmbracelet/lipgloss"
+	"github.com/oliver/git-ai-commit/internal/ai"
 )
 
 // DonePanel displays the final commit result.
 type DonePanel struct {
 	commonPanel
-	result    CommitFlowResult
-	commitMsg string
-	commitHash string
-	isPartial bool
-	remaining []string
-	verified  bool
-	tokenInfo string
-	termWidth  int
-	termHeight int
+	result       CommitFlowResult
+	commitMsg    string
+	commitHash   string
+	isPartial    bool
+	remaining    []string
+	verified     bool
+	tokenInfo    string
+	reviewResult *ai.ReviewResult
+	termWidth    int
+	termHeight   int
 }
 
-func NewDonePanel(result CommitFlowResult, commitMsg, commitHash string, isPartial bool, remaining []string, verified bool, tokenInfo string) *DonePanel {
+func NewDonePanel(result CommitFlowResult, commitMsg, commitHash string, isPartial bool, remaining []string, verified bool, tokenInfo string, reviewResult *ai.ReviewResult) *DonePanel {
 	return &DonePanel{
-		result:     result,
-		commitMsg:  commitMsg,
-		commitHash: commitHash,
-		isPartial:  isPartial,
-		remaining:  remaining,
-		verified:   verified,
-		tokenInfo:  tokenInfo,
+		result:       result,
+		commitMsg:    commitMsg,
+		commitHash:   commitHash,
+		isPartial:    isPartial,
+		remaining:    remaining,
+		verified:     verified,
+		tokenInfo:    tokenInfo,
+		reviewResult: reviewResult,
 	}
 }
 
@@ -89,6 +92,12 @@ func (p *DonePanel) View(width, height int) string {
 				)
 			b.WriteString(warningCard)
 		}
+
+		// Review result card
+		if p.reviewResult != nil {
+			b.WriteString("\n\n")
+			b.WriteString(p.renderReviewCard(contentW))
+		}
 	} else {
 		errCard := lipgloss.NewStyle().
 			Border(lipgloss.RoundedBorder()).
@@ -101,6 +110,104 @@ func (p *DonePanel) View(width, height int) string {
 	}
 
 	return b.String()
+}
+
+func (p *DonePanel) renderReviewCard(contentW int) string {
+	rr := p.reviewResult
+
+	// Determine card color based on recommendation
+	var borderColor lipgloss.Color
+	var titleIcon string
+	switch rr.Recommendation {
+	case "approve":
+		borderColor = Th.Success
+		titleIcon = "✓"
+	case "approve_with_warnings":
+		borderColor = Th.Warning
+		titleIcon = "⚠"
+	case "request_changes":
+		borderColor = Th.Error
+		titleIcon = "✗"
+	default:
+		borderColor = Th.DimText
+		titleIcon = "•"
+	}
+
+	var content strings.Builder
+
+	// Summary
+	content.WriteString(DimStyle().Render("变更摘要: ") + rr.Summary + "\n\n")
+
+	// Simple change indicator
+	if rr.IsSimple {
+		content.WriteString(DimStyle().Render("审查模式: ") + "简单变更（跳过详细审查）\n\n")
+	}
+
+	// Recommendation
+	recText := map[string]string{
+		"approve":               "通过 - 无风险可提交",
+		"approve_with_warnings": "通过（有警告）- 可提交但建议关注",
+		"request_changes":       "需修改 - 有严重问题",
+	}
+	recLabel := recText[rr.Recommendation]
+	if recLabel == "" {
+		recLabel = rr.Recommendation
+	}
+	content.WriteString(DimStyle().Render("审查建议: ") + titleIcon + " " + recLabel + "\n")
+
+	// Breaking changes
+	if rr.BreakingChanges {
+		content.WriteString(lipgloss.NewStyle().Foreground(Th.Error).Bold(true).Render("⚠ 包含破坏性变更") + "\n")
+	}
+
+	// Highlights
+	if len(rr.Highlights) > 0 {
+		content.WriteString("\n" + DimStyle().Render("亮点:") + "\n")
+		for _, h := range rr.Highlights {
+			content.WriteString("  • " + h + "\n")
+		}
+	}
+
+	// Risks
+	if len(rr.Risks) > 0 {
+		content.WriteString("\n" + DimStyle().Render("风险项:") + "\n")
+		for i, r := range rr.Risks {
+			sevColor := Th.DimText
+			switch r.Severity {
+			case "critical":
+				sevColor = Th.Error
+			case "high":
+				sevColor = Th.Error
+			case "medium":
+				sevColor = Th.Warning
+			case "low":
+				sevColor = Th.Success
+			}
+
+			sevLabel := lipgloss.NewStyle().Foreground(sevColor).Bold(true).Render(fmt.Sprintf("[%s]", r.Severity))
+			catLabel := DimStyle().Render(fmt.Sprintf("[%s]", r.Category))
+
+			content.WriteString(fmt.Sprintf("  %d. %s %s ", i+1, sevLabel, catLabel))
+			if r.File != "" {
+				content.WriteString(DimStyle().Render(r.File))
+				if r.Line > 0 {
+					content.WriteString(DimStyle().Render(fmt.Sprintf(":%d", r.Line)))
+				}
+				content.WriteString(" ")
+			}
+			content.WriteString(r.Description + "\n")
+			if r.Suggestion != "" {
+				content.WriteString("     " + DimStyle().Render("→ "+r.Suggestion) + "\n")
+			}
+		}
+	}
+
+	return lipgloss.NewStyle().
+		Border(lipgloss.RoundedBorder()).
+		BorderForeground(borderColor).
+		Padding(1, 2).
+		Width(contentW - 4).
+		Render(content.String())
 }
 
 func (p *DonePanel) Help() []HelpEntry {

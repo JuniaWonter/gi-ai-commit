@@ -11,3 +11,19 @@ git-ai-commit
 .firecrawl/git-commit-authoritative.json
 
 .firecrawl/git-commit-conventions.json
+
+.firecrawl/apiiro-best-practices.json
+
+.firecrawl/google-looking-for.json
+
+.firecrawl/search-ai-code-review.json
+
+.firecrawl/search-code-review-checklist.json
+
+.firecrawl/dx-checklist.json
+
+.firecrawl/search-commit-quality.json
+
+.firecrawl/search-google-code-review.json
+
+.firecrawl/search-review-dimensions.json

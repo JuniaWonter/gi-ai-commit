@@ -16,8 +16,8 @@ type Config struct {
 }
 
 type AIConfig struct {
-	DefaultModel string                   `yaml:"default_model"`
-	Models       map[string]ModelConfig   `yaml:"models"`
+	DefaultModel string                 `yaml:"default_model"`
+	Models       map[string]ModelConfig `yaml:"models"`
 }
 
 type ModelConfig struct {

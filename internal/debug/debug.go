@@ -5,6 +5,8 @@ import (
 	"os"
 	"strings"
 	"time"
+
+	"github.com/oliver/git-ai-commit/internal/logger"
 )
 
 func Enabled() bool {
@@ -25,9 +27,10 @@ func FDCount() int {
 }
 
 func Logf(format string, args ...any) {
+	msg := fmt.Sprintf(format, args...)
+	logger.Debug("[fd=%d] %s", FDCount(), msg)
 	if !Enabled() {
 		return
 	}
-	msg := fmt.Sprintf(format, args...)
 	_, _ = fmt.Fprintf(os.Stderr, "[git-ai-debug %s fd=%d] %s\n", time.Now().Format("15:04:05.000"), FDCount(), msg)
 }

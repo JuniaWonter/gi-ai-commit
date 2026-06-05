@@ -13,6 +13,7 @@ import (
 	"time"
 
 	"github.com/oliver/git-ai-commit/internal/git"
+	"github.com/oliver/git-ai-commit/internal/logger"
 	openai "github.com/sashabaranov/go-openai"
 )
 
@@ -36,6 +37,7 @@ const (
 
 func NewClient(config Config) (*Client, error) {
 	if config.APIKey == "" {
+		logger.Error("API Key 未配置")
 		return nil, fmt.Errorf("API Key 未配置")
 	}
 
@@ -50,6 +52,7 @@ func NewClient(config Config) (*Client, error) {
 		config.Timeout = 30 * time.Second
 	}
 
+	logger.Info("AI client initialized model=%s baseURL=%s timeout=%s", config.Model, config.BaseURL, config.Timeout)
 	return &Client{
 		client: client,
 		config: config,
@@ -79,10 +82,12 @@ func (c *Client) GenerateCommitMessage(diffContent, description string) (string,
 
 	resp, err := c.client.CreateChatCompletion(ctx, req)
 	if err != nil {
+		logger.Error("调用 AI API 失败: %v", err)
 		return "", fmt.Errorf("调用 AI API 失败：%w", err)
 	}
 
 	if len(resp.Choices) == 0 {
+		logger.Error("API 返回空响应")
 		return "", fmt.Errorf("API 返回空响应")
 	}
 
@@ -108,10 +113,12 @@ func (c *Client) GenerateCommitMessageWithConventions(diffContent, description s
 
 	resp, err := c.client.CreateChatCompletion(ctx, req)
 	if err != nil {
+		logger.Error("调用 AI API 失败: %v", err)
 		return "", fmt.Errorf("调用 AI API 失败：%w", err)
 	}
 
 	if len(resp.Choices) == 0 {
+		logger.Error("API 返回空响应")
 		return "", fmt.Errorf("API 返回空响应")
 	}
 
@@ -141,23 +148,23 @@ func (p PendingToolCall) ArgString(key string) string {
 }
 
 type CommitSession struct {
-	client           *Client
-	messages         []openai.ChatCompletionMessage
-	tools            []openai.Tool
-	retryCount       int
-	maxRetries       int
-	loopCount        int
-	maxLoops         int
-	toolResults      []ToolCallResult
-	commitMsg        string
-	streaming        bool
-	promptTokens     int
-	completionTokens int
-	totalTokens      int
-	readFileCalls    int
-	listTreeCalls    int
-	maxReadFileCalls int
-	maxListTreeCalls int
+	client             *Client
+	messages           []openai.ChatCompletionMessage
+	tools              []openai.Tool
+	retryCount         int
+	maxRetries         int
+	loopCount          int
+	maxLoops           int
+	toolResults        []ToolCallResult
+	commitMsg          string
+	streaming          bool
+	promptTokens       int
+	completionTokens   int
+	totalTokens        int
+	readFileCalls      int
+	listTreeCalls      int
+	maxReadFileCalls   int
+	maxListTreeCalls   int
 	compactMode        bool
 	noToolCallFallback bool
 	toolCache          map[string]string
@@ -167,6 +174,27 @@ type CommitSession struct {
 	phase              int
 	understanding      string
 	phase2SystemPrompt string
+	// 审查结果
+	ReviewResult *ReviewResult
+}
+
+type ReviewResult struct {
+	Summary         string
+	HasRisk         bool
+	IsSimple        bool
+	Recommendation  string
+	Highlights      []string
+	BreakingChanges bool
+	Risks           []ReviewRisk
+}
+
+type ReviewRisk struct {
+	Severity    string
+	Category    string
+	File        string
+	Line        int
+	Description string
+	Suggestion  string
 }
 
 type StreamChunk struct {
@@ -223,12 +251,13 @@ func (c *Client) StartCommitSession(diffContent, description string, conventionI
 		maxReadFileCalls:   dynReadFileLimit(len(selectedFiles)),
 		maxListTreeCalls:   envIntOrDefault("GIT_AI_MAX_LIST_TREE_CALLS", 1),
 		compactMode:        compactMode,
-		toolCache:           make(map[string]string),
-		readFiles:           make(map[string]bool),
-		phase:               PhaseUnderstand,
-		phase2SystemPrompt:  phase2Prompt,
+		toolCache:          make(map[string]string),
+		readFiles:          make(map[string]bool),
+		phase:              PhaseUnderstand,
+		phase2SystemPrompt: phase2Prompt,
 	}
 
+	logger.Info("AI session started model=%s compactMode=%v selectedFiles=%d estimatedTokens=%d", c.config.Model, compactMode, len(selectedFiles), estimatedTokens)
 	return sess, nil
 }
 
@@ -276,11 +305,11 @@ func (s *CommitSession) StreamAI(send func(chunk StreamChunk)) ([]PendingToolCal
 	s.streaming = true
 	maxTokens := envIntOrDefault("GIT_AI_MAX_COMPLETION_TOKENS", 0)
 	req := openai.ChatCompletionRequest{
-		Model:    s.client.config.Model,
-		Messages: s.messages,
-		Tools:    s.tools,
+		Model:       s.client.config.Model,
+		Messages:    s.messages,
+		Tools:       s.tools,
 		Temperature: 0.3,
-		Stream:   true,
+		Stream:      true,
 	}
 	if maxTokens > 0 {
 		req.MaxCompletionTokens = maxTokens
@@ -291,6 +320,7 @@ func (s *CommitSession) StreamAI(send func(chunk StreamChunk)) ([]PendingToolCal
 
 	stream, err := s.client.client.CreateChatCompletionStream(ctx, req)
 	if err != nil {
+		logger.Error("调用 AI API 失败: %v", err)
 		return nil, fmt.Errorf("调用 AI API 失败：%w", err)
 	}
 	defer stream.Close()
@@ -376,7 +406,7 @@ func (s *CommitSession) StreamAI(send func(chunk StreamChunk)) ([]PendingToolCal
 
 	// 【关键】检测是否因为输出超限被截断
 	// finish_reason="length" 是 API 返回的最可靠截断信号
-		// 启发式规则 isTruncationSignal 作为兜底
+	// 启发式规则 isTruncationSignal 作为兜底
 	isOutputTruncated := len(toolCalls) == 0 && (finishReason == openai.FinishReasonLength || isTruncationSignal(fullContent.String()))
 
 	// 【关键】如果没有 tool_calls，需要诊断原因
@@ -469,101 +499,105 @@ func (s *CommitSession) ExecuteAndResumeWithStream(pending []PendingToolCall, au
 	}
 
 	type execResult struct {
-			index  int
-			result string
+		index  int
+		result string
+	}
+
+	results := make([]execResult, len(pending))
+	rejected := make([]bool, len(pending))
+
+	// Add rejection messages for unauthorized calls
+	for i, auth := range authorized {
+		if i >= len(pending) {
+			break
 		}
-
-		results := make([]execResult, len(pending))
-		rejected := make([]bool, len(pending))
-
-		// Add rejection messages for unauthorized calls
-		for i, auth := range authorized {
-			if i >= len(pending) {
-				break
-			}
-			if !auth {
-				rejected[i] = true
-				s.messages = append(s.messages, openai.ChatCompletionMessage{
-					Role:       openai.ChatMessageRoleTool,
-					Content:    "用户拒绝了此工具调用",
-					ToolCallID: pending[i].ID,
-				})
-			}
-		}
-
-		// Execute non-commit tools in parallel
-		var wg sync.WaitGroup
-		for i, tc := range pending {
-			if i >= len(authorized) {
-				break
-			}
-			if rejected[i] {
-				continue
-			}
-			if tc.Name == "git_commit" || tc.Name == "git_commit_amend" {
-				continue
-			}
-			wg.Add(1)
-			go func(idx int, call PendingToolCall) {
-				defer wg.Done()
-				results[idx] = execResult{index: idx, result: s.executeToolCallWithLimit(call.Name, call.ArgsJSON)}
-			}(i, tc)
-		}
-		wg.Wait()
-
-		// Execute commit tools sequentially
-		for i, tc := range pending {
-			if i >= len(authorized) {
-				break
-			}
-			if rejected[i] {
-				continue
-			}
-			if tc.Name != "git_commit" && tc.Name != "git_commit_amend" {
-				continue
-			}
-			results[i] = execResult{index: i, result: s.executeToolCallWithLimit(tc.Name, tc.ArgsJSON)}
-		}
-
-		// Append results in original order
-		for _, r := range results {
-			if r.result == "" && rejected[r.index] {
-				continue
-			}
-			tc := pending[r.index]
-			s.toolResults = append(s.toolResults, ToolCallResult{
-				ToolName: tc.Name,
-				Args:     json.RawMessage(tc.ArgsJSON),
-				Result:   r.result,
-			})
-
-			if tc.Name == "git_commit" || tc.Name == "git_commit_amend" {
-				var args struct {
-					Message string `json:"message"`
-				}
-				json.Unmarshal(json.RawMessage(tc.ArgsJSON), &args)
-				s.commitMsg = args.Message
-			}
-
+		if !auth {
+			rejected[i] = true
 			s.messages = append(s.messages, openai.ChatCompletionMessage{
 				Role:       openai.ChatMessageRoleTool,
-				Content:    r.result,
-				ToolCallID: tc.ID,
+				Content:    "用户拒绝了此工具调用",
+				ToolCallID: pending[i].ID,
 			})
 		}
+	}
 
-		// Phase transition: summarize_changes 触发 Phase 1 → Phase 2
-		if s.phase == PhaseUnderstand && hasSummarize {
-			for _, tr := range s.toolResults {
-				if tr.ToolName == "summarize_changes" {
-					if idx := strings.Index(tr.Result, "UNDERSTANDING_RECORDED: "); idx >= 0 {
-						s.understanding = tr.Result[idx+len("UNDERSTANDING_RECORDED: "):]
-					}
-					break
-				}
-			}
-			s.transitionToPhase2()
+	// Execute non-commit tools in parallel
+	var wg sync.WaitGroup
+	for i, tc := range pending {
+		if i >= len(authorized) {
+			break
 		}
+		if rejected[i] {
+			continue
+		}
+		if tc.Name == "git_commit" || tc.Name == "git_commit_amend" {
+			continue
+		}
+		wg.Add(1)
+		go func(idx int, call PendingToolCall) {
+			defer wg.Done()
+			results[idx] = execResult{index: idx, result: s.executeToolCallWithLimit(call.Name, call.ArgsJSON)}
+		}(i, tc)
+	}
+	wg.Wait()
+
+	// Execute commit tools sequentially
+	for i, tc := range pending {
+		if i >= len(authorized) {
+			break
+		}
+		if rejected[i] {
+			continue
+		}
+		if tc.Name != "git_commit" && tc.Name != "git_commit_amend" {
+			continue
+		}
+		results[i] = execResult{index: i, result: s.executeToolCallWithLimit(tc.Name, tc.ArgsJSON)}
+	}
+
+	// Append results in original order
+	for _, r := range results {
+		if r.result == "" && rejected[r.index] {
+			continue
+		}
+		tc := pending[r.index]
+		s.toolResults = append(s.toolResults, ToolCallResult{
+			ToolName: tc.Name,
+			Args:     json.RawMessage(tc.ArgsJSON),
+			Result:   r.result,
+		})
+
+		if tc.Name == "git_commit" || tc.Name == "git_commit_amend" {
+			var args struct {
+				Message string `json:"message"`
+			}
+			json.Unmarshal(json.RawMessage(tc.ArgsJSON), &args)
+			s.commitMsg = args.Message
+		}
+
+		if tc.Name == "report_review" && s.ReviewResult == nil {
+			s.ReviewResult = parseReviewResult(tc.ArgsJSON)
+		}
+
+		s.messages = append(s.messages, openai.ChatCompletionMessage{
+			Role:       openai.ChatMessageRoleTool,
+			Content:    r.result,
+			ToolCallID: tc.ID,
+		})
+	}
+
+	// Phase transition: summarize_changes 触发 Phase 1 → Phase 2
+	if s.phase == PhaseUnderstand && hasSummarize {
+		for _, tr := range s.toolResults {
+			if tr.ToolName == "summarize_changes" {
+				if idx := strings.Index(tr.Result, "UNDERSTANDING_RECORDED: "); idx >= 0 {
+					s.understanding = tr.Result[idx+len("UNDERSTANDING_RECORDED: "):]
+				}
+				break
+			}
+		}
+		s.transitionToPhase2()
+	}
 
 	committed := false
 	commitFailed := false
@@ -608,7 +642,7 @@ func (s *CommitSession) ExecuteAndResumeWithStream(pending []PendingToolCall, au
 // transitionToPhase2 从理解阶段切换到审查提交阶段
 func (s *CommitSession) transitionToPhase2() {
 	s.phase = PhaseCommit
-		s.loopCount = 0 // Phase 2 有独立的轮次预算
+	s.loopCount = 0 // Phase 2 有独立的轮次预算
 	for i, msg := range s.messages {
 		if msg.Role == openai.ChatMessageRoleSystem {
 			s.messages[i].Content = s.phase2SystemPrompt
@@ -665,6 +699,7 @@ func (s *CommitSession) fillFallbackTokenEstimate(outputContent string) {
 }
 
 func executeToolCall(name, argsJSON string) string {
+	logger.Debug("executeToolCall name=%s args=%s", name, truncate(argsJSON, 200))
 	switch name {
 	case "list_tree":
 		var args struct {
@@ -707,12 +742,15 @@ func executeToolCall(name, argsJSON string) string {
 			Message string `json:"message"`
 		}
 		if err := json.Unmarshal(json.RawMessage(argsJSON), &args); err != nil {
+			logger.Error("git_commit 参数解析失败: %v", err)
 			return fmt.Sprintf("ERROR: 解析参数失败：%v", err)
 		}
 		result := git.Commit(args.Message)
 		if result.Success {
+			logger.Info("git_commit 成功 hash=%s", result.Hash)
 			return fmt.Sprintf("SUCCESS: 提交成功 %s", result.Hash)
 		}
+		logger.Error("git_commit 失败 stderr=%s", result.Stderr)
 		classified := git.ClassifyCommitError(result.Stderr)
 		return fmt.Sprintf("FAILED: %s\n分类：%s\n建议：%s\n原始错误：%s",
 			classified.Message, categoryLabel(classified.Category), classified.Suggestion, classified.RawStderr)
@@ -722,12 +760,15 @@ func executeToolCall(name, argsJSON string) string {
 			Message string `json:"message"`
 		}
 		if err := json.Unmarshal(json.RawMessage(argsJSON), &args); err != nil {
+			logger.Error("git_commit_amend 参数解析失败: %v", err)
 			return fmt.Sprintf("ERROR: 解析参数失败：%v", err)
 		}
 		result := git.CommitAmend(args.Message)
 		if result.Success {
+			logger.Info("git_commit_amend 成功 hash=%s", result.Hash)
 			return fmt.Sprintf("SUCCESS: amend 成功 %s", result.Hash)
 		}
+		logger.Error("git_commit_amend 失败 stderr=%s", result.Stderr)
 		classified := git.ClassifyCommitError(result.Stderr)
 		return fmt.Sprintf("FAILED: %s\n分类：%s\n建议：%s\n原始错误：%s",
 			classified.Message, categoryLabel(classified.Category), classified.Suggestion, classified.RawStderr)
@@ -789,20 +830,22 @@ func executeToolCall(name, argsJSON string) string {
 
 	case "report_review":
 		var args struct {
-			Summary string `json:"summary"`
-			HasRisk bool   `json:"has_risk"`
+			Summary         string                   `json:"summary"`
+			HasRisk         bool                     `json:"has_risk"`
+			IsSimple        bool                     `json:"is_simple"`
+			Recommendation  string                   `json:"recommendation"`
+			Highlights      []string                 `json:"highlights"`
+			BreakingChanges bool                     `json:"breaking_changes"`
+			Risks           []map[string]interface{} `json:"risks"`
 		}
 		if err := json.Unmarshal(json.RawMessage(argsJSON), &args); err != nil {
 			return fmt.Sprintf("ERROR: 解析参数失败：%v", err)
 		}
-		// Unmarshal risks as raw to preserve the full structure
-		var full struct {
-			Risks []map[string]interface{} `json:"risks"`
-		}
-		json.Unmarshal(json.RawMessage(argsJSON), &full)
-		result := fmt.Sprintf("REVIEW_RESULT:\n摘要: %s\n风险: ", args.Summary)
-		if args.HasRisk && len(full.Risks) > 0 {
-			for i, r := range full.Risks {
+		result := fmt.Sprintf("REVIEW_RESULT:\n摘要: %s\n建议: %s\n风险: ", args.Summary, args.Recommendation)
+		if args.IsSimple {
+			result = "REVIEW_RESULT:\n摘要: " + args.Summary + "\n建议: approve (简单变更)\n风险: 无 (简单变更跳过详细审查)"
+		} else if args.HasRisk && len(args.Risks) > 0 {
+			for i, r := range args.Risks {
 				sev, _ := r["severity"].(string)
 				cat, _ := r["category"].(string)
 				desc, _ := r["description"].(string)
@@ -929,6 +972,52 @@ func categoryLabel(cat git.ErrorCategory) string {
 	}
 }
 
+func parseReviewResult(argsJSON string) *ReviewResult {
+	var args struct {
+		Summary         string                   `json:"summary"`
+		HasRisk         bool                     `json:"has_risk"`
+		IsSimple        bool                     `json:"is_simple"`
+		Recommendation  string                   `json:"recommendation"`
+		Highlights      []string                 `json:"highlights"`
+		BreakingChanges bool                     `json:"breaking_changes"`
+		Risks           []map[string]interface{} `json:"risks"`
+	}
+	if err := json.Unmarshal(json.RawMessage(argsJSON), &args); err != nil {
+		return nil
+	}
+	rr := &ReviewResult{
+		Summary:         args.Summary,
+		HasRisk:         args.HasRisk,
+		IsSimple:        args.IsSimple,
+		Recommendation:  args.Recommendation,
+		Highlights:      args.Highlights,
+		BreakingChanges: args.BreakingChanges,
+	}
+	for _, r := range args.Risks {
+		risk := ReviewRisk{}
+		if s, ok := r["severity"].(string); ok {
+			risk.Severity = s
+		}
+		if s, ok := r["category"].(string); ok {
+			risk.Category = s
+		}
+		if s, ok := r["file"].(string); ok {
+			risk.File = s
+		}
+		if n, ok := r["line"].(float64); ok {
+			risk.Line = int(n)
+		}
+		if s, ok := r["description"].(string); ok {
+			risk.Description = s
+		}
+		if s, ok := r["suggestion"].(string); ok {
+			risk.Suggestion = s
+		}
+		rr.Risks = append(rr.Risks, risk)
+	}
+	return rr
+}
+
 func findLastStderr(results []ToolCallResult) string {
 	for i := len(results) - 1; i >= 0; i-- {
 		if results[i].ToolName == "git_commit" || results[i].ToolName == "git_commit_amend" {
@@ -1023,7 +1112,7 @@ func buildGeneratePrompt(diffContent, description string) string {
 // buildAuthSystemPrompt 构建 Phase 2（审查提交阶段）系统提示词
 func buildAuthSystemPrompt(conventionInfo git.ConventionInfo, scopeHints []string) string {
 	var b strings.Builder
-	b.WriteString("你是资深代码审查助手。工作流程：审查风险 → 提交。\n\n")
+	b.WriteString("你是资深代码审查助手。工作流程：审查风险 → report_review → 提交。\n\n")
 	b.WriteString("你已在理解阶段阅读了代码，当前对话中已包含对变更的结构化理解。\n")
 	b.WriteString("如需补充阅读特定代码，仍可使用 read_file。\n\n")
 
@@ -1033,19 +1122,25 @@ func buildAuthSystemPrompt(conventionInfo git.ConventionInfo, scopeHints []strin
 	b.WriteString("3. 审查与提交分离：审查意见是给用户的辅助信息，commit message 必须基于代码变更本身生成。\n")
 	b.WriteString("4. 节约 token：每次工具调用结果都会累积在对话中。只读必要的行，不读整个文件。\n\n")
 
-	b.WriteString("【审查要点】\n")
-	b.WriteString("基于代码内容识别以下问题，无风险则跳过：\n")
-	b.WriteString("- 逻辑缺陷：边界条件、竞态、状态转换\n")
-	b.WriteString("- 安全隐患：注入、XSS、权限泄露\n")
-	b.WriteString("- 性能问题：不必要的循环、重复查询\n")
-	b.WriteString("- 错误处理：异常未捕获、降级缺失\n")
-	b.WriteString("- 可维护性：魔法数字、过度耦合\n")
+	b.WriteString("【审查维度】（8 个维度，根据变更类型选择性检查）\n")
+	b.WriteString("1. 正确性 (correctness): 逻辑缺陷、边界条件、竞态条件、状态转换\n")
+	b.WriteString("2. 安全性 (security): 注入、XSS、权限泄露、敏感信息暴露\n")
+	b.WriteString("3. 性能 (performance): 不必要的循环、重复查询、内存泄漏\n")
+	b.WriteString("4. 错误处理 (error_handling): 异常未捕获、降级缺失、错误信息不明确\n")
+	b.WriteString("5. 设计 (design): 架构合理性、职责划分、接口设计\n")
+	b.WriteString("6. 测试 (testing): 测试覆盖、边界用例、回归风险\n")
+	b.WriteString("7. 可维护性 (maintainability): 魔法数字、过度耦合、命名清晰度\n")
+	b.WriteString("8. 一致性 (consistency): 代码风格、命名规范、项目约定\n")
 	b.WriteString("审查结果须引用具体代码行说明判断依据。\n\n")
+
+	b.WriteString("【简单变更快速通道】\n")
+	b.WriteString("如果变更极为简单（如纯注释、单行修复、配置微调），可设置 is_simple=true 跳过详细审查。\n")
+	b.WriteString("判断标准：变更不涉及逻辑、不影响运行时行为、不改变接口。\n\n")
 
 	b.WriteString("【执行顺序】\n")
 	b.WriteString("1. 基于已有理解分析风险\n")
 	b.WriteString("2. 如有需要 read_file 补充阅读关键代码\n")
-	b.WriteString("3. 输出审查意见（有风险则引用代码行，无风险跳过）\n")
+	b.WriteString("3. 调用 report_review 输出审查意见（必须调用，在 git_commit 之前）\n")
 	b.WriteString("4. 调用 git_commit 提交（commit message 基于变更结构摘要，而非审查结论）\n")
 	b.WriteString("5. 提交成功后输出 【最终提交信息】\n\n")
 
@@ -1090,6 +1185,7 @@ func buildAuthSystemPrompt(conventionInfo git.ConventionInfo, scopeHints []strin
 	b.WriteString("- 避免在对话中混入无关的长文本，控制每轮输出长度\n")
 	b.WriteString("- tool 结果中已有内容的文件，直接引用，不要重复 read_file\n")
 	b.WriteString("- list_tree 默认 depth=1\n")
+	b.WriteString("- report_review 必须在 git_commit 之前调用\n")
 	b.WriteString("- git_commit 是最终目标，失败用 amend 修正，最多 3 次\n")
 	b.WriteString("- 不可恢复错误时不重试\n")
 	b.WriteString("- 提交后输出：\n")
@@ -1103,12 +1199,13 @@ func buildAuthSystemPrompt(conventionInfo git.ConventionInfo, scopeHints []strin
 
 func buildAuthSystemPromptCompact(conventionInfo git.ConventionInfo, scopeHints []string) string {
 	var b strings.Builder
-	b.WriteString("你是代码审查助手。工作流程：审查风险 → 提交。\n")
+	b.WriteString("你是代码审查助手。工作流程：审查风险 → report_review → 提交。\n")
 	b.WriteString("已在理解阶段阅读了代码，直接进入审查和提交。\n")
-	b.WriteString("审查要点：逻辑缺陷、安全隐患、性能、错误处理、可维护性\n")
+	b.WriteString("审查维度：正确性、安全性、性能、错误处理、设计、测试、可维护性、一致性\n")
+	b.WriteString("简单变更（注释/单行修复/配置微调）可设 is_simple=true 跳过详细审查。\n")
 	b.WriteString("先读代码再判断，commit message 描述变更本身不是审查结论。\n")
 	b.WriteString("diff 可能被截断，用 read_file 补全。控制输出长度节约 token。\n\n")
-	b.WriteString("步骤: 分析风险 → read_file(需要时) → 输出审查意见 → git_commit\n")
+	b.WriteString("步骤: 分析风险 → read_file(需要时) → report_review(必须) → git_commit\n")
 	b.WriteString("Commit 格式: <type>(<scope>): <subject>\n")
 	b.WriteString("type: feat|fix|docs|style|refactor|perf|test|build|ci|chore|revert\n")
 
@@ -1120,7 +1217,7 @@ func buildAuthSystemPromptCompact(conventionInfo git.ConventionInfo, scopeHints 
 		b.WriteString("规范:\n" + truncate(conventionInfo.AllConventionTools, 300) + "\n")
 	}
 
-	b.WriteString("规则: 读代码再判断; commit 描述变更本身; git_commit 是目标; 失败用 amend\n")
+	b.WriteString("规则: 读代码再判断; report_review 在 git_commit 前; commit 描述变更本身; git_commit 是目标; 失败用 amend\n")
 
 	return b.String()
 }
@@ -1296,7 +1393,7 @@ func isTruncationSignal(content string) bool {
 
 	// 特征 5: 内容以 "commit" 或 "修" 等中文字结尾（生成被中断）
 	if strings.HasSuffix(content, "commit") || strings.HasSuffix(content, "修") ||
-	   strings.HasSuffix(content, "改") || strings.HasSuffix(content, "的") {
+		strings.HasSuffix(content, "改") || strings.HasSuffix(content, "的") {
 		return true
 	}
 
@@ -1344,7 +1441,7 @@ func extractCommitMessageFromTruncated(content string) string {
 		}
 		// 检查是否看起来像 commit message（通常以 type: 或 type(...): 开头）
 		if (strings.Contains(line, ":") || strings.Contains(line, "：")) &&
-		   len(line) > 5 && len(line) < 200 {
+			len(line) > 5 && len(line) < 200 {
 			return line
 		}
 	}
@@ -1538,10 +1635,12 @@ func (c *Client) GenerateDescription(projectInfo, fileInfo, diffContent string) 
 
 	resp, err := c.client.CreateChatCompletion(ctx, req)
 	if err != nil {
+		logger.Error("GenerateDescription API 调用失败: %v", err)
 		return "", fmt.Errorf("调用 AI API 失败：%w", err)
 	}
 
 	if len(resp.Choices) == 0 {
+		logger.Error("GenerateDescription API 返回空响应")
 		return "", fmt.Errorf("API 返回空响应")
 	}
 

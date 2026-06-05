@@ -13,6 +13,7 @@ import (
 	"github.com/oliver/git-ai-commit/internal/debug"
 	"github.com/oliver/git-ai-commit/internal/diff"
 	"github.com/oliver/git-ai-commit/internal/git"
+	"github.com/oliver/git-ai-commit/internal/logger"
 )
 
 type phase int
@@ -90,7 +91,7 @@ type CommitFlowModel struct {
 	stageInProgress bool
 
 	// AI session
-	session     *ai.CommitSession
+	session      *ai.CommitSession
 	continueSess *ai.PersistableSession
 
 	// Stream actor (per-round)
@@ -106,6 +107,7 @@ type CommitFlowModel struct {
 	commitVerified   bool
 	userAuthorized   bool
 	lastPendingCalls []ai.PendingToolCall // saved for overlay confirmation
+	reviewResult     *ai.ReviewResult     // captured from report_review tool call
 }
 
 func NewCommitFlowModel(files []diff.FileChange, opts CommitFlowOptions) *CommitFlowModel {
@@ -229,10 +231,13 @@ func (m *CommitFlowModel) switchToDone() {
 			m.header.TokenCount = r.TotalTokens
 			tokenStr = fmt.Sprintf("prompt=%d completion=%d total=%d", r.PromptTokens, r.CompletionTokens, r.TotalTokens)
 		}
+		if m.session.ReviewResult != nil && m.reviewResult == nil {
+			m.reviewResult = m.session.ReviewResult
+		}
 	}
 	// Create DonePanel with result
 	r := m.GetResult()
-	m.panel = NewDonePanel(r, m.commitMessage, m.verifiedHash, m.isPartialCommit, m.remainingFiles, m.commitVerified, tokenStr)
+	m.panel = NewDonePanel(r, m.commitMessage, m.verifiedHash, m.isPartialCommit, m.remainingFiles, m.commitVerified, tokenStr, m.reviewResult)
 }
 
 // --- Message handlers ---
@@ -252,6 +257,7 @@ func (m *CommitFlowModel) handleFilePanelMsg(msg filePanelMsg) (tea.Model, tea.C
 func (m *CommitFlowModel) handleStageDone(msg stageDoneMsg) (tea.Model, tea.Cmd) {
 	m.stageInProgress = false
 	if !msg.success {
+		logger.Warn("stage 失败: %v", msg.err)
 		m.switchToDone()
 		return m, nil
 	}
@@ -305,6 +311,7 @@ func (m *CommitFlowModel) handleAiRound(msg aiRoundMsg) (tea.Model, tea.Cmd) {
 	}
 
 	if msg.err != nil {
+		logger.Error("AI round 失败: %v", msg.err)
 		sp.AppendError(fmt.Sprintf("失败: %v", msg.err))
 		m.switchToDone()
 		return m, nil
@@ -323,10 +330,11 @@ func (m *CommitFlowModel) handleAiRound(msg aiRoundMsg) (tea.Model, tea.Cmd) {
 			m.isPartialCommit = vResult.IsPartial
 			m.commitVerified = vResult.Verified && vResult.Error == ""
 			if !m.commitVerified && vResult.Error != "" {
+				logger.Warn("commit 验证失败: %s", vResult.Error)
 				sp.AppendError(fmt.Sprintf("验证失败: %s", vResult.Error))
 			}
-			// Save session for --continue
 			if err := m.session.SaveSession(); err != nil {
+				logger.Warn("保存会话失败: %v", err)
 				debug.Logf("保存会话失败: %v", err)
 			}
 		}
@@ -421,6 +429,7 @@ func (m *CommitFlowModel) startStageCmd(files []string) tea.Cmd {
 		debug.Logf("staging files=%v", files)
 		originalStaged := getStagedFiles()
 		if err := diff.StageFiles(files); err != nil {
+			logger.Error("stage 文件失败: %v", err)
 			debug.Logf("stage failed err=%v", err)
 			return stageDoneMsg{success: false, err: err}
 		}
@@ -430,6 +439,7 @@ func (m *CommitFlowModel) startStageCmd(files []string) tea.Cmd {
 		processor := diff.NewDiffProcessor(m.opts.DiffCfg, m.opts.GitRoot)
 		payloads, err := processor.BuildPayloadsForFiles(files)
 		if err != nil || len(payloads) == 0 {
+			logger.Error("构建 diff payload 失败: err=%v count=%d", err, len(payloads))
 			debug.Logf("payload build failed err=%v count=%d", err, len(payloads))
 			return stageDoneMsg{success: false, err: fmt.Errorf("获取 staged diff 失败: %w", err)}
 		}
@@ -444,6 +454,7 @@ func (m *CommitFlowModel) startStageCmd(files []string) tea.Cmd {
 func (m *CommitFlowModel) startGenerateCmd() tea.Cmd {
 	conventionInfo := git.DetectConventions()
 	debug.Logf("starting AI session diffMode=%s bytes=%d", m.stagedDiffMode, len(m.stagedDiff))
+	logger.Info("starting AI session diffMode=%s bytes=%d continue=%v", m.stagedDiffMode, len(m.stagedDiff), m.continueSess != nil)
 
 	var sess *ai.CommitSession
 	var err error
@@ -453,6 +464,7 @@ func (m *CommitFlowModel) startGenerateCmd() tea.Cmd {
 		sess, err = m.opts.Client.StartCommitSession(m.stagedDiff, m.opts.DescFunc(), conventionInfo, 3, m.selectedFiles)
 	}
 	if err != nil {
+		logger.Error("创建 AI session 失败: %v", err)
 		return func() tea.Msg { return aiRoundMsg{err: err} }
 	}
 	m.session = sess
@@ -464,6 +476,7 @@ func (m *CommitFlowModel) startGenerateCmd() tea.Cmd {
 			send(streamChunkMsg{chunk: chunk})
 		})
 		if streamErr != nil {
+			logger.Error("StreamAI 失败: %v", streamErr)
 			send(aiRoundMsg{err: streamErr})
 			return
 		}
@@ -490,6 +503,7 @@ func (m *CommitFlowModel) execPendingCmd(pending []ai.PendingToolCall, authorize
 			send(streamChunkMsg{chunk: chunk})
 		})
 		if err != nil {
+			logger.Error("ExecuteAndResumeWithStream 失败: %v", err)
 			send(aiRoundMsg{err: err})
 			return
 		}
@@ -635,11 +649,13 @@ func RunCommitFlow(files []diff.FileChange, opts CommitFlowOptions) (CommitFlowR
 
 	model, err := p.Run()
 	if err != nil {
+		logger.Error("运行 TUI 失败: %v", err)
 		return CommitFlowResult{}, fmt.Errorf("运行 TUI 失败: %w", err)
 	}
 
 	fm, ok := model.(*CommitFlowModel)
 	if !ok {
+		logger.Error("类型转换失败")
 		return CommitFlowResult{}, fmt.Errorf("类型转换失败")
 	}
 

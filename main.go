@@ -7,6 +7,7 @@ import (
 	"syscall"
 
 	"github.com/oliver/git-ai-commit/cmd"
+	"github.com/oliver/git-ai-commit/internal/logger"
 )
 
 const version = "0.1.0"
@@ -19,6 +20,11 @@ func main() {
 		rLimit.Cur = rLimit.Max
 		_ = syscall.Setrlimit(syscall.RLIMIT_NOFILE, &rLimit)
 	}
+
+	if err := logger.Init(); err != nil {
+		fmt.Fprintf(os.Stderr, "⚠️  日志初始化失败（不影响使用）：%v\n", err)
+	}
+	defer logger.Close()
 
 	if len(os.Args) < 2 {
 		printUsage()
@@ -46,8 +52,10 @@ func main() {
 
 		if err := cmd.RunCommit(opts); err != nil {
 			if err.Error() == "用户取消提交" {
+				logger.Info("用户取消提交")
 				os.Exit(130)
 			}
+			logger.Error("commit 命令失败: %v", err)
 			fmt.Fprintf(os.Stderr, "❌ 错误：%v\n", err)
 			os.Exit(1)
 		}
