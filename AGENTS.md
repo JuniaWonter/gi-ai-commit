@@ -54,7 +54,7 @@ go test -v ./internal/diff/ -run TestParseNumStat
 - **Spinner.Update** must run in Panel.Update() default branch, else spinner stops
 - **StreamActor.Run()** returns `tea.Cmd` (uses `NextMsgCmd`), not `tea.Msg`
 - **contentH** must clamp to ≥1 after subtraction
-- **Overlay** is a bottom confirmation bar, not a screen overlay (replaces FooterBar). Only used for `summarize_changes` phase transition; git_commit uses `ask_user` tool instead
+- **Overlay** is a bottom confirmation bar, not a screen overlay (replaces FooterBar). Required for `git_commit`, `git_commit_amend`, and `summarize_changes` (unless `--auto-confirm`). AI may also use `ask_user` tool for other confirmations.
 - **renderMarkdown** needs `Width()` set on all lines for wrapping
 - **Viewport sizing**: `SetViewportSize` must be called once after Panel creation; `WindowSizeMsg` must forward to Panel on resize
 

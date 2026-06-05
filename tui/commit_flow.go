@@ -418,7 +418,7 @@ func (m *CommitFlowModel) requiresConfirm(pending []ai.PendingToolCall) bool {
 		return false
 	}
 	for _, tc := range pending {
-		if tc.Name == "summarize_changes" {
+		if tc.Name == "git_commit" || tc.Name == "git_commit_amend" || tc.Name == "summarize_changes" {
 			return true
 		}
 	}
