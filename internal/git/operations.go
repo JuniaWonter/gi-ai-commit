@@ -5,6 +5,8 @@ import (
 	"fmt"
 	"os/exec"
 	"strings"
+
+	"github.com/oliver/git-ai-commit/internal/logger"
 )
 
 func GetStatus() (string, error) {
@@ -78,8 +80,14 @@ func GetBranch(all bool) (string, error) {
 
 	currentCmd := exec.Command("git", "branch", "--show-current")
 	currentCmd.Dir = gitRoot
-	currentOut, _ := currentCmd.Output()
+	currentOut, err := currentCmd.Output()
+	if err != nil {
+		logger.Warn("获取当前分支失败: %v", err)
+	}
 	current := strings.TrimSpace(string(currentOut))
+	if current == "" {
+		current = "detached HEAD"
+	}
 
 	result := fmt.Sprintf("当前分支: %s\n\n%s", current, strings.TrimSpace(string(out)))
 	return result, nil

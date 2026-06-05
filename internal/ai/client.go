@@ -19,6 +19,15 @@ import (
 	openai "github.com/sashabaranov/go-openai"
 )
 
+// parseGitArgs 解析 Git 工具参数的通用辅助函数
+func parseGitArgs[T any](argsJSON string) (T, error) {
+	var args T
+	if err := json.Unmarshal(json.RawMessage(argsJSON), &args); err != nil {
+		return args, fmt.Errorf("解析参数失败：%w", err)
+	}
+	return args, nil
+}
+
 type Client struct {
 	client *openai.Client
 	config Config
@@ -559,7 +568,7 @@ func (s *CommitSession) ExecuteAndResumeWithStream(pending []PendingToolCall, au
 		if rejected[i] {
 			continue
 		}
-		if tc.Name == "git_commit" || tc.Name == "git_commit_amend" {
+		if tc.Name == "git_commit" || tc.Name == "git_commit_amend" || tc.Name == "ask_user" {
 			continue
 		}
 		wg.Add(1)
@@ -570,7 +579,7 @@ func (s *CommitSession) ExecuteAndResumeWithStream(pending []PendingToolCall, au
 	}
 	wg.Wait()
 
-	// Execute commit tools sequentially
+	// Execute commit and ask_user tools sequentially
 	for i, tc := range pending {
 		if i >= len(authorized) {
 			break
@@ -578,7 +587,7 @@ func (s *CommitSession) ExecuteAndResumeWithStream(pending []PendingToolCall, au
 		if rejected[i] {
 			continue
 		}
-		if tc.Name != "git_commit" && tc.Name != "git_commit_amend" {
+		if tc.Name != "git_commit" && tc.Name != "git_commit_amend" && tc.Name != "ask_user" {
 			continue
 		}
 		results[i] = execResult{index: i, result: s.executeToolCallWithLimit(tc.Name, tc.ArgsJSON)}
@@ -939,11 +948,13 @@ func executeToolCall(name, argsJSON string) string {
 		return result
 
 	case "git_log":
-		var args struct {
+		args, err := parseGitArgs[struct {
 			Count   int  `json:"count"`
 			Oneline bool `json:"oneline"`
+		}](argsJSON)
+		if err != nil {
+			return fmt.Sprintf("ERROR: %v", err)
 		}
-		json.Unmarshal(json.RawMessage(argsJSON), &args)
 		if args.Count <= 0 {
 			args.Count = 10
 		}
@@ -954,10 +965,12 @@ func executeToolCall(name, argsJSON string) string {
 		return result
 
 	case "git_branch":
-		var args struct {
+		args, err := parseGitArgs[struct {
 			All bool `json:"all"`
+		}](argsJSON)
+		if err != nil {
+			return fmt.Sprintf("ERROR: %v", err)
 		}
-		json.Unmarshal(json.RawMessage(argsJSON), &args)
 		result, err := git.GetBranch(args.All)
 		if err != nil {
 			return fmt.Sprintf("ERROR: %v", err)
@@ -965,10 +978,12 @@ func executeToolCall(name, argsJSON string) string {
 		return result
 
 	case "git_diff_unstaged":
-		var args struct {
+		args, err := parseGitArgs[struct {
 			Path string `json:"path"`
+		}](argsJSON)
+		if err != nil {
+			return fmt.Sprintf("ERROR: %v", err)
 		}
-		json.Unmarshal(json.RawMessage(argsJSON), &args)
 		result, err := git.GetDiffUnstaged(args.Path)
 		if err != nil {
 			return fmt.Sprintf("ERROR: %v", err)
@@ -976,11 +991,11 @@ func executeToolCall(name, argsJSON string) string {
 		return result
 
 	case "git_add":
-		var args struct {
+		args, err := parseGitArgs[struct {
 			Paths []string `json:"paths"`
-		}
-		if err := json.Unmarshal(json.RawMessage(argsJSON), &args); err != nil {
-			return fmt.Sprintf("ERROR: 解析参数失败：%v", err)
+		}](argsJSON)
+		if err != nil {
+			return fmt.Sprintf("ERROR: %v", err)
 		}
 		if len(args.Paths) == 0 {
 			return "ERROR: paths 不能为空"
@@ -992,12 +1007,12 @@ func executeToolCall(name, argsJSON string) string {
 		return result
 
 	case "git_restore":
-		var args struct {
+		args, err := parseGitArgs[struct {
 			Paths  []string `json:"paths"`
 			Staged bool     `json:"staged"`
-		}
-		if err := json.Unmarshal(json.RawMessage(argsJSON), &args); err != nil {
-			return fmt.Sprintf("ERROR: 解析参数失败：%v", err)
+		}](argsJSON)
+		if err != nil {
+			return fmt.Sprintf("ERROR: %v", err)
 		}
 		if len(args.Paths) == 0 {
 			return "ERROR: paths 不能为空"
@@ -1009,13 +1024,13 @@ func executeToolCall(name, argsJSON string) string {
 		return result
 
 	case "git_stash":
-		var args struct {
+		args, err := parseGitArgs[struct {
 			Action  string `json:"action"`
 			Message string `json:"message"`
 			Index   int    `json:"index"`
-		}
-		if err := json.Unmarshal(json.RawMessage(argsJSON), &args); err != nil {
-			return fmt.Sprintf("ERROR: 解析参数失败：%v", err)
+		}](argsJSON)
+		if err != nil {
+			return fmt.Sprintf("ERROR: %v", err)
 		}
 		result, err := git.Stash(args.Action, args.Message, args.Index)
 		if err != nil {
@@ -1024,13 +1039,13 @@ func executeToolCall(name, argsJSON string) string {
 		return result
 
 	case "git_blame":
-		var args struct {
+		args, err := parseGitArgs[struct {
 			Path      string `json:"path"`
 			StartLine int    `json:"start_line"`
 			EndLine   int    `json:"end_line"`
-		}
-		if err := json.Unmarshal(json.RawMessage(argsJSON), &args); err != nil {
-			return fmt.Sprintf("ERROR: 解析参数失败：%v", err)
+		}](argsJSON)
+		if err != nil {
+			return fmt.Sprintf("ERROR: %v", err)
 		}
 		result, err := git.GetBlame(args.Path, args.StartLine, args.EndLine)
 		if err != nil {
@@ -1039,13 +1054,13 @@ func executeToolCall(name, argsJSON string) string {
 		return result
 
 	case "git_tag":
-		var args struct {
+		args, err := parseGitArgs[struct {
 			Action  string `json:"action"`
 			Name    string `json:"name"`
 			Message string `json:"message"`
-		}
-		if err := json.Unmarshal(json.RawMessage(argsJSON), &args); err != nil {
-			return fmt.Sprintf("ERROR: 解析参数失败：%v", err)
+		}](argsJSON)
+		if err != nil {
+			return fmt.Sprintf("ERROR: %v", err)
 		}
 		result, err := git.Tag(args.Action, args.Name, args.Message)
 		if err != nil {
