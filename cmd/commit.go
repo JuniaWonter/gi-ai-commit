@@ -140,8 +140,27 @@ func RunCommit(opts CommitOptions) error {
 	debug.Logf("cmd.RunCommit flow result success=%v selectedFiles=%d commitHash=%s", result.Success, len(result.SelectedFiles), result.CommitHash)
 
 	if !result.Success {
-		logger.Info("用户取消提交")
-		return fmt.Errorf("用户取消提交")
+		// Distinguish between different failure modes
+		switch result.Error {
+		case "user_cancel":
+			logger.Info("用户取消提交")
+			return fmt.Errorf("用户取消提交")
+		case "ai_failure":
+			logger.Error("AI 执行失败，未能完成提交流程")
+			return fmt.Errorf("AI 执行失败，未能完成提交流程")
+		case "ai_no_commit":
+			logger.Error("AI 未调用 git_commit，提交流程未完成")
+			return fmt.Errorf("AI 未调用 git_commit，提交流程未完成。可能原因：1) AI 认为变更不需要提交 2) AI 陷入循环 3) 会话超时")
+		case "stage_failed":
+			logger.Error("文件暂存失败")
+			return fmt.Errorf("文件暂存失败，无法继续")
+		case "timeout":
+			logger.Error("会话超时")
+			return fmt.Errorf("会话超时，请重试")
+		default:
+			logger.Error("提交流程未完成: %s", result.Error)
+			return fmt.Errorf("提交流程未完成: %s", result.Error)
+		}
 	}
 
 	fmt.Println("📊 更新计数...")

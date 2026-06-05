@@ -191,6 +191,9 @@ type CommitSession struct {
 	skillManager *skill.Manager
 	// 用户输入（用于 ask_user 工具）
 	askUserAnswer string
+	// 会话超时保护
+	startTime   time.Time
+	maxDuration time.Duration
 }
 
 type ReviewResult struct {
@@ -330,6 +333,8 @@ func (c *Client) StartCommitSession(diffContent, description string, conventionI
 		phase:                PhaseUnderstand,
 		phase2SystemPrompt:   phase2Prompt,
 		skillManager:         skillMgr,
+		startTime:            time.Now(),
+		maxDuration:          10 * time.Minute, // 10 minute timeout
 	}
 
 	logger.Info("AI session started model=%s compactMode=%v selectedFiles=%d estimatedTokens=%d memoryLen=%d skills=%d", c.config.Model, compactMode, len(selectedFiles), estimatedTokens, len(memoryContent), len(skillMgr.SkillNames()))
@@ -379,6 +384,8 @@ func (c *Client) ContinueCommitSession(ps *PersistableSession, diffContent strin
 		readFiles:            make(map[string]bool),
 		phase:                PhaseCommit,
 		skillManager:         skillMgr,
+		startTime:            time.Now(),
+		maxDuration:          10 * time.Minute, // 10 minute timeout
 	}
 
 	return sess, nil
@@ -599,23 +606,35 @@ func (s *CommitSession) ExecuteAndResume(pending []PendingToolCall, authorized [
 }
 
 func (s *CommitSession) ExecuteAndResumeWithStream(pending []PendingToolCall, authorized []bool, send func(chunk StreamChunk)) ([]PendingToolCall, error) {
+	logger.Debug("ExecuteAndResumeWithStream: loop=%d/%d, retry=%d/%d, phase=%d, tools=%d", 
+		s.loopCount, s.maxLoops, s.retryCount, s.maxRetries, s.phase, len(pending))
+	
+	// Check session timeout
+	if time.Since(s.startTime) > s.maxDuration {
+		logger.Warn("会话超时: duration=%v 超过 maxDuration=%v", time.Since(s.startTime), s.maxDuration)
+		return nil, fmt.Errorf("会话超时（%v），请重试", s.maxDuration)
+	}
+	
 	if s.loopCount > s.maxLoops {
-		return nil, fmt.Errorf("工具调用轮次过多（%d 次），AI 可能陷入循环，请手动处理", s.loopCount)
+		logger.Warn("AI 陷入循环: loopCount=%d 超过 maxLoops=%d", s.loopCount, s.maxLoops)
+		return nil, fmt.Errorf("AI 陷入循环（%d 次工具调用），请手动处理", s.loopCount)
 	}
 	if s.retryCount > s.maxRetries {
 		classified := git.ClassifyCommitError(findLastStderr(s.toolResults))
 		if classified.Category == git.ErrorUnrecoverable {
+			logger.Warn("不可恢复的错误: %s", classified.Message)
 			return nil, fmt.Errorf("不可恢复的错误：%s\n建议：%s", classified.Message, classified.Suggestion)
 		}
+		logger.Warn("提交失败次数达上限: retryCount=%d", s.retryCount)
 		return nil, fmt.Errorf("提交失败次数达上限（%d 次），请手动处理", s.maxRetries)
 	}
 
 	// 检查此轮是否包含 summarize_changes（用于 Phase 1 → Phase 2 转换）
 	hasSummarize := false
 	for _, tc := range pending {
+		logger.Debug("工具调用: %s", tc.Name)
 		if tc.Name == "summarize_changes" {
 			hasSummarize = true
-			break
 		}
 	}
 
@@ -709,6 +728,7 @@ func (s *CommitSession) ExecuteAndResumeWithStream(pending []PendingToolCall, au
 
 	// Phase transition: summarize_changes 触发 Phase 1 → Phase 2
 	if s.phase == PhaseUnderstand && hasSummarize {
+		logger.Info("Phase 转换: Phase 1 (理解) → Phase 2 (审查提交)")
 		for _, tr := range s.toolResults {
 			if tr.ToolName == "summarize_changes" {
 				if idx := strings.Index(tr.Result, "UNDERSTANDING_RECORDED: "); idx >= 0 {
@@ -726,8 +746,10 @@ func (s *CommitSession) ExecuteAndResumeWithStream(pending []PendingToolCall, au
 		if tr.ToolName == "git_commit" || tr.ToolName == "git_commit_amend" {
 			if strings.Contains(tr.Result, "SUCCESS") {
 				committed = true
+				logger.Info("提交成功: %s", tr.ToolName)
 			} else if strings.Contains(tr.Result, "FAILED") {
 				commitFailed = true
+				logger.Warn("提交失败: %s - %s", tr.ToolName, tr.Result)
 			}
 		}
 	}
@@ -736,6 +758,7 @@ func (s *CommitSession) ExecuteAndResumeWithStream(pending []PendingToolCall, au
 	s.compressMessagesInMemory()
 
 	if committed {
+		logger.Info("流程结束: 提交成功，退出循环")
 		return nil, nil
 	}
 
@@ -744,6 +767,7 @@ func (s *CommitSession) ExecuteAndResumeWithStream(pending []PendingToolCall, au
 	if commitFailed {
 		vResult := git.VerifyCommit()
 		if vResult.Error == "" && vResult.Hash != "" {
+			logger.Info("二次验证: 提交实际已成功 (hash=%s)，尽管 AI 报告失败", vResult.Hash)
 			// 提交实际已成功，更新 tool result 以便后续流程正确处理
 			for i, tr := range s.toolResults {
 				if tr.ToolName == "git_commit" || tr.ToolName == "git_commit_amend" {
@@ -760,6 +784,7 @@ func (s *CommitSession) ExecuteAndResumeWithStream(pending []PendingToolCall, au
 	if commitFailed {
 		s.retryCount++
 	}
+	logger.Debug("继续下一轮: loop=%d, retry=%d", s.loopCount, s.retryCount)
 	return s.StreamAI(send)
 }
 

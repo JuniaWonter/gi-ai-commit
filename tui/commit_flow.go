@@ -68,6 +68,7 @@ type CommitFlowResult struct {
 	IsPartial        bool
 	RemainingFiles   []string
 	ReviewResult     *ai.ReviewResult
+	Error            string // 失败原因：user_cancel, ai_failure, timeout, etc.
 }
 
 // CommitFlowModel is the root model. It acts as a thin router,
@@ -113,6 +114,7 @@ type CommitFlowModel struct {
 	userAuthorized   bool
 	lastPendingCalls []ai.PendingToolCall // saved for overlay confirmation
 	reviewResult     *ai.ReviewResult     // captured from report_review tool call
+	errorReason      string               // 失败原因：user_cancel, ai_failure, timeout, stage_failed, etc.
 
 	// Ask user state
 	askUserPending *ai.PendingToolCall // the ask_user tool call being answered
@@ -255,6 +257,7 @@ func (m *CommitFlowModel) switchToDone() {
 
 func (m *CommitFlowModel) handleFilePanelMsg(msg filePanelMsg) (tea.Model, tea.Cmd) {
 	if msg.cancelled {
+		m.errorReason = "user_cancel"
 		return m, tea.Quit
 	}
 	m.selectedFiles = msg.selectedFiles
@@ -269,6 +272,7 @@ func (m *CommitFlowModel) handleStageDone(msg stageDoneMsg) (tea.Model, tea.Cmd)
 	m.stageInProgress = false
 	if !msg.success {
 		logger.Warn("stage 失败: %v", msg.err)
+		m.errorReason = "stage_failed"
 		m.switchToDone()
 		return m, nil
 	}
@@ -327,6 +331,12 @@ func (m *CommitFlowModel) handleAiRound(msg aiRoundMsg) (tea.Model, tea.Cmd) {
 	if msg.err != nil {
 		logger.Error("AI round 失败: %v", msg.err)
 		sp.AppendError(fmt.Sprintf("失败: %v", msg.err))
+		// Distinguish between timeout and other failures
+		if strings.Contains(msg.err.Error(), "会话超时") {
+			m.errorReason = "timeout"
+		} else {
+			m.errorReason = "ai_failure"
+		}
 		m.switchToDone()
 		return m, nil
 	}
@@ -351,6 +361,10 @@ func (m *CommitFlowModel) handleAiRound(msg aiRoundMsg) (tea.Model, tea.Cmd) {
 				logger.Warn("保存会话失败: %v", err)
 				debug.Logf("保存会话失败: %v", err)
 			}
+		} else {
+			// AI didn't call git_commit - this is the key case we're trying to fix
+			logger.Warn("AI 未调用 git_commit，流程结束但没有提交")
+			m.errorReason = "ai_no_commit"
 		}
 		sp.FlushStream()
 		sp.done = true
@@ -708,6 +722,7 @@ func (m *CommitFlowModel) GetResult() CommitFlowResult {
 		IsPartial:        m.isPartialCommit,
 		RemainingFiles:   m.remainingFiles,
 		ReviewResult:     m.reviewResult,
+		Error:            m.errorReason,
 	}
 }
 

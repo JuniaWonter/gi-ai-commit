@@ -40,6 +40,10 @@ go test -v ./internal/diff/ -run TestParseNumStat
 
 **Token management**: Estimates tokens at startup; >85% context window triggers compact mode (aggressive truncation + shorter prompt). Conversation history auto-compresses in-memory after each round (keeps last 3 tool results, discards older read_file/list_tree/diff_overview results) to prevent OOM on long sessions.
 
+**Session timeout**: 10-minute timeout protection prevents infinite loops. Timeout errors are distinguished from user cancellations and AI failures in error messages.
+
+**Error handling**: Distinguishes between user cancel (exit 130), AI failure (exit 2), stage failure (exit 3), and timeout (exit 4). Error reasons are logged and displayed to users with actionable suggestions.
+
 **Truncation detection**: `finish_reason=length` + heuristic rules → auto-retry with degradation or extract commit message from truncated output
 
 **Concurrent tools**: Non-commit tools run in parallel; commit tools run serially. `read_file`/`list_tree` have call limits to prevent token waste.

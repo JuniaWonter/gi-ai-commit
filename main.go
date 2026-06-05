@@ -4,6 +4,7 @@ import (
 	"flag"
 	"fmt"
 	"os"
+	"strings"
 	"syscall"
 
 	"github.com/oliver/git-ai-commit/cmd"
@@ -57,7 +58,18 @@ func main() {
 			}
 			logger.Error("commit 命令失败: %v", err)
 			fmt.Fprintf(os.Stderr, "❌ 错误：%v\n", err)
-			os.Exit(1)
+			
+			// Exit with different codes based on error type
+			switch {
+			case strings.Contains(err.Error(), "AI 执行失败") || strings.Contains(err.Error(), "AI 未调用"):
+				os.Exit(2) // AI failure
+			case strings.Contains(err.Error(), "文件暂存失败"):
+				os.Exit(3) // Stage failure
+			case strings.Contains(err.Error(), "会话超时"):
+				os.Exit(4) // Timeout
+			default:
+				os.Exit(1) // Generic error
+			}
 		}
 
 	case "version", "-v", "--version":
