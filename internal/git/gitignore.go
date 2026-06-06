@@ -4,6 +4,7 @@ import (
 	"bufio"
 	"fmt"
 	"os"
+	"os/exec"
 	"path/filepath"
 	"strings"
 )
@@ -17,6 +18,7 @@ func AddToGitignore(entry string) error {
 	gitignorePath := filepath.Join(gitRoot, ".gitignore")
 
 	var lines []string
+	alreadyExists := false
 	if fileExists(gitignorePath) {
 		data, err := os.ReadFile(gitignorePath)
 		if err != nil {
@@ -25,7 +27,8 @@ func AddToGitignore(entry string) error {
 		lines = strings.Split(string(data), "\n")
 		for _, line := range lines {
 			if strings.TrimSpace(line) == entry {
-				return fmt.Errorf("条目 %s 已存在于 .gitignore", entry)
+				alreadyExists = true
+				break
 			}
 		}
 		if len(lines) > 0 && lines[len(lines)-1] != "" {
@@ -35,23 +38,39 @@ func AddToGitignore(entry string) error {
 		lines = []string{}
 	}
 
-	lines = append(lines, entry)
+	if !alreadyExists {
+		lines = append(lines, entry)
 
-	f, err := os.Create(gitignorePath)
-	if err != nil {
-		return fmt.Errorf("创建 .gitignore 失败：%w", err)
-	}
-	defer f.Close()
+		f, err := os.Create(gitignorePath)
+		if err != nil {
+			return fmt.Errorf("创建 .gitignore 失败：%w", err)
+		}
+		defer f.Close()
 
-	w := bufio.NewWriter(f)
-	for _, line := range lines {
-		w.WriteString(line + "\n")
+		w := bufio.NewWriter(f)
+		for _, line := range lines {
+			w.WriteString(line + "\n")
+		}
+		if err := w.Flush(); err != nil {
+			return fmt.Errorf("写入 .gitignore 失败：%w", err)
+		}
 	}
-	if err := w.Flush(); err != nil {
-		return fmt.Errorf("写入 .gitignore 失败：%w", err)
+
+	if isTracked(gitRoot, entry) {
+		cmd := exec.Command("git", "rm", "--cached", "--", entry)
+		cmd.Dir = gitRoot
+		if out, err := cmd.CombinedOutput(); err != nil {
+			return fmt.Errorf("从 git 追踪中移除失败：%s", strings.TrimSpace(string(out)))
+		}
 	}
 
 	return nil
+}
+
+func isTracked(gitRoot, path string) bool {
+	cmd := exec.Command("git", "ls-files", "--error-unmatch", "--", path)
+	cmd.Dir = gitRoot
+	return cmd.Run() == nil
 }
 
 func RemoveFromGitignore(entry string) error {

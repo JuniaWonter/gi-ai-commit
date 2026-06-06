@@ -583,14 +583,14 @@ func (s *CommitSession) StreamAI(send func(chunk StreamChunk)) ([]PendingToolCal
 	var pending []PendingToolCall
 	for _, tc := range toolCalls {
 		var args map[string]interface{}
-		if err := json.Unmarshal(json.RawMessage(tc.Function.Arguments), &args); err != nil {
+		sanitized := sanitizeJSON(tc.Function.Arguments)
+		if err := json.Unmarshal(json.RawMessage(sanitized), &args); err != nil {
 			logger.Warn("Failed to parse tool arguments: %v, args: %s", err, tc.Function.Arguments)
-			// Still add the pending call, but with nil args - executeToolCall will handle the error
 		}
 		pending = append(pending, PendingToolCall{
 			ID:       tc.ID,
 			Name:     tc.Function.Name,
-			ArgsJSON: tc.Function.Arguments,
+			ArgsJSON: sanitized,
 			Args:     args,
 		})
 	}
@@ -1697,6 +1697,51 @@ func escapeJSON(s string) string {
 	s = strings.ReplaceAll(s, "\r", "\\r")
 	s = strings.ReplaceAll(s, "\t", "\\t")
 	return s
+}
+
+// sanitizeJSON fixes invalid JSON from AI models that return unescaped
+// control characters inside string values (e.g. literal \n in strings).
+func sanitizeJSON(s string) string {
+	var b strings.Builder
+	inString := false
+	escaped := false
+	for i := 0; i < len(s); i++ {
+		c := s[i]
+		if escaped {
+			b.WriteByte(c)
+			escaped = false
+			continue
+		}
+		if c == '\\' && inString {
+			b.WriteByte(c)
+			escaped = true
+			continue
+		}
+		if c == '"' {
+			inString = !inString
+			b.WriteByte(c)
+			continue
+		}
+		if inString {
+			switch c {
+			case '\n':
+				b.WriteString("\\n")
+			case '\r':
+				b.WriteString("\\r")
+			case '\t':
+				b.WriteString("\\t")
+			default:
+				if c < 0x20 {
+					fmt.Fprintf(&b, "\\u%04x", c)
+				} else {
+					b.WriteByte(c)
+				}
+			}
+		} else {
+			b.WriteByte(c)
+		}
+	}
+	return b.String()
 }
 
 func minInt(a, b int) int {

@@ -200,7 +200,7 @@ func StageFiles(paths []string) error {
 
 	if len(toStage) > 0 {
 		debug.Logf("diff.StageFiles stage files count=%d", len(toStage))
-		args := []string{"add"}
+		args := []string{"add", "-f"}
 		args = append(args, toStage...)
 		cmd := exec.Command("git", args...)
 		cmd.Dir = gitRoot
