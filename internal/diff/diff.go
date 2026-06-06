@@ -40,32 +40,48 @@ func GetChangedFiles() ([]FileChange, error) {
 	}
 
 	lines := strings.Split(strings.TrimSpace(string(output)), "\n")
-	var files []FileChange
+	var allPaths []string
+	var pathInfo []struct {
+		path   string
+		staged bool
+		isDir  bool
+	}
 
+	// First pass: collect all paths
 	for _, line := range lines {
 		if len(line) < 3 {
 			continue
 		}
 
 		status := line[:2]
-		// 所有有效变更（新增、修改、删除、重命名等）都显示给用户选择
-		// StageFiles 已处理已删除文件（git add -u）
-
 		path := strings.TrimSpace(line[2:])
-		
-		// Skip files that are ignored by git
-		if isIgnored(gitRoot, path) {
+		staged := status[0] != ' '
+		isDir := strings.HasSuffix(path, "/")
+
+		allPaths = append(allPaths, path)
+		pathInfo = append(pathInfo, struct {
+			path   string
+			staged bool
+			isDir  bool
+		}{path, staged, isDir})
+	}
+
+	// Batch check which files are ignored
+	ignoredSet := batchCheckIgnored(gitRoot, allPaths)
+
+	// Second pass: build file list, skipping ignored files
+	var files []FileChange
+	for _, info := range pathInfo {
+		if ignoredSet[info.path] {
 			continue
 		}
-		
-		staged := status[0] != ' '
 
-		if strings.HasSuffix(path, "/") {
-			expanded, err := expandUntrackedDir(gitRoot, path)
+		if info.isDir {
+			expanded, err := expandUntrackedDir(gitRoot, info.path)
 			if err != nil || len(expanded) == 0 {
 				files = append(files, FileChange{
-					Path:   path,
-					Staged: staged,
+					Path:   info.path,
+					Staged: info.staged,
 				})
 			} else {
 				for _, fp := range expanded {
@@ -77,8 +93,8 @@ func GetChangedFiles() ([]FileChange, error) {
 			}
 		} else {
 			files = append(files, FileChange{
-				Path:   path,
-				Staged: staged,
+				Path:   info.path,
+				Staged: info.staged,
 			})
 		}
 	}
@@ -107,10 +123,37 @@ func GetChangedFiles() ([]FileChange, error) {
 	return files, nil
 }
 
-func isIgnored(gitRoot, path string) bool {
-	cmd := exec.Command("git", "check-ignore", "-q", "--no-index", "--", path)
+// batchCheckIgnored checks multiple paths at once using git check-ignore
+// Returns a set of ignored paths for O(1) lookup
+func batchCheckIgnored(gitRoot string, paths []string) map[string]bool {
+	ignored := make(map[string]bool)
+	if len(paths) == 0 {
+		return ignored
+	}
+
+	args := []string{"check-ignore", "--no-index"}
+	args = append(args, paths...)
+	cmd := exec.Command("git", args...)
 	cmd.Dir = gitRoot
-	return cmd.Run() == nil
+	output, err := cmd.Output()
+	
+	// Exit code 1 means no files are ignored (not an error)
+	if err != nil {
+		if exitErr, ok := err.(*exec.ExitError); ok && exitErr.ExitCode() == 1 {
+			return ignored
+		}
+		// For other errors, assume no files are ignored
+		return ignored
+	}
+
+	// Parse output: each line is an ignored path
+	for _, line := range strings.Split(strings.TrimSpace(string(output)), "\n") {
+		if line != "" {
+			ignored[line] = true
+		}
+	}
+
+	return ignored
 }
 
 func GetFileDiff(filePath string) (string, error) {
