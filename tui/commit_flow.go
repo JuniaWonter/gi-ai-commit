@@ -308,9 +308,12 @@ func (m *CommitFlowModel) handleStreamChunk(msg streamChunkMsg) (tea.Model, tea.
 	if msg.chunk.Content != "" {
 		sp.streamContent.WriteString(msg.chunk.Content)
 	}
-	// Auto-scroll
+	// Smart auto-scroll: only scroll to bottom if user is already near the bottom
 	if sp.vpReady {
-		sp.viewport.GotoBottom()
+		atBottom := sp.viewport.AtBottom() || (sp.viewport.TotalLineCount()-sp.viewport.YOffset-sp.viewport.Height < 3)
+		if atBottom {
+			sp.viewport.GotoBottom()
+		}
 	}
 	return m, tea.Batch(
 		m.actor.NextMsgCmd(),
@@ -770,6 +773,7 @@ func RunCommitFlow(files []diff.FileChange, opts CommitFlowOptions) (CommitFlowR
 
 	p := tea.NewProgram(m,
 		tea.WithAltScreen(),
+		tea.WithMouseCellMotion(),
 	)
 
 	model, err := p.Run()

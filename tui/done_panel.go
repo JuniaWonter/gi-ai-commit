@@ -4,6 +4,7 @@ import (
 	"fmt"
 	"strings"
 
+	"github.com/charmbracelet/bubbles/viewport"
 	tea "github.com/charmbracelet/bubbletea"
 	"github.com/charmbracelet/lipgloss"
 	"github.com/oliver/git-ai-commit/internal/ai"
@@ -22,6 +23,8 @@ type DonePanel struct {
 	reviewResult *ai.ReviewResult
 	termWidth    int
 	termHeight   int
+	viewport     viewport.Model
+	vpReady      bool
 }
 
 func NewDonePanel(result CommitFlowResult, commitMsg, commitHash string, isPartial bool, remaining []string, verified bool, tokenInfo string, reviewResult *ai.ReviewResult) *DonePanel {
@@ -39,17 +42,53 @@ func NewDonePanel(result CommitFlowResult, commitMsg, commitHash string, isParti
 
 func (p *DonePanel) Init() tea.Cmd { return nil }
 
+func (p *DonePanel) SetViewportSize(width, height int) {
+	if width <= 0 {
+		width = 80
+	}
+	contentH := height - 4
+	if contentH < 1 {
+		contentH = 1
+	}
+	if !p.vpReady {
+		p.viewport = viewport.New(width, contentH)
+		p.viewport.Style = lipgloss.NewStyle().Padding(0, 1)
+		p.viewport.MouseWheelEnabled = true
+		p.vpReady = true
+	} else {
+		p.viewport.Width = width
+		p.viewport.Height = contentH
+	}
+	p.termWidth = width
+	p.termHeight = height
+}
+
 func (p *DonePanel) Update(msg tea.Msg) (Panel, tea.Cmd) {
 	switch msg := msg.(type) {
 	case tea.WindowSizeMsg:
 		p.termWidth = msg.Width
 		p.termHeight = msg.Height
+		p.SetViewportSize(msg.Width, msg.Height)
 	case tea.KeyMsg:
 		switch msg.String() {
 		case "q", "enter", "esc":
 			return p, tea.Quit
 		case "ctrl+c":
 			return p, tea.Quit
+		default:
+			// Forward other keys to viewport for scrolling
+			if p.vpReady {
+				var cmd tea.Cmd
+				p.viewport, cmd = p.viewport.Update(msg)
+				return p, cmd
+			}
+		}
+	case tea.MouseMsg:
+		// Forward mouse events to viewport for scrolling
+		if p.vpReady {
+			var cmd tea.Cmd
+			p.viewport, cmd = p.viewport.Update(msg)
+			return p, cmd
 		}
 	}
 	return p, nil
@@ -60,6 +99,9 @@ func (p *DonePanel) View(width, height int) string {
 		width = 80
 	}
 	contentW := width - 4
+
+	// Initialize viewport if needed
+	p.SetViewportSize(width, height)
 
 	var b strings.Builder
 
@@ -109,7 +151,9 @@ func (p *DonePanel) View(width, height int) string {
 		b.WriteString(errCard)
 	}
 
-	return b.String()
+	// Set content and return viewport view
+	p.viewport.SetContent(b.String())
+	return p.viewport.View()
 }
 
 func (p *DonePanel) renderReviewCard(contentW int) string {

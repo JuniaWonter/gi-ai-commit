@@ -3,6 +3,7 @@ package tui
 import (
 	"fmt"
 	"os"
+	"sort"
 	"strconv"
 	"strings"
 
@@ -25,6 +26,11 @@ var (
 
 	cursorStyle = lipgloss.NewStyle().
 			Foreground(lipgloss.Color("205"))
+
+	folderStyle = lipgloss.NewStyle().
+			Foreground(lipgloss.Color("4")).
+			Bold(true).
+			Padding(0, 1)
 
 	addedLineStyle = lipgloss.NewStyle().
 			Foreground(lipgloss.Color("2"))
@@ -141,14 +147,20 @@ type FileSelector struct {
 	hunkPositions []int
 	lineTypes     []string
 	gitignoreMsg  string
+	// Folder grouping
+	collapsedFolders map[string]bool
+	fileListVP       viewport.Model
+	fileListReady    bool
 }
 
 func NewFileSelector(files []diff.FileChange) *FileSelector {
 	selected := make(map[int]bool)
+	collapsedFolders := make(map[string]bool)
 	return &FileSelector{
-		files:    files,
-		cursor:   0,
-		selected: selected,
+		files:            files,
+		cursor:           0,
+		selected:         selected,
+		collapsedFolders: collapsedFolders,
 	}
 }
 
@@ -371,19 +383,29 @@ func (f *FileSelector) handleSelectorKeys(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 		return f, tea.Quit
 
 	case "up", "k":
-		if f.cursor > 0 {
-			f.cursor--
-		}
+		f.moveCursorUp()
 
 	case "down", "j":
-		if f.cursor < len(f.files)-1 {
-			f.cursor++
+		f.moveCursorDown()
+
+	case "tab":
+		// Toggle folder collapse
+		items := f.buildDisplayList()
+		if f.cursor < len(items) && items[f.cursor].isFolder {
+			f.toggleFolderCollapse(items[f.cursor].folder)
+			// Adjust cursor if needed
+			newItems := f.buildDisplayList()
+			if f.cursor >= len(newItems) {
+				f.cursor = len(newItems) - 1
+			}
 		}
 
 	case " ":
-		if len(f.files) > 0 {
-			f.selected[f.cursor] = !f.selected[f.cursor]
-			f.files[f.cursor].Selected = f.selected[f.cursor]
+		items := f.buildDisplayList()
+		if f.cursor < len(items) && !items[f.cursor].isFolder {
+			fileIdx := items[f.cursor].fileIndex
+			f.selected[fileIdx] = !f.selected[fileIdx]
+			f.files[fileIdx].Selected = f.selected[fileIdx]
 		}
 
 	case "enter":
@@ -398,9 +420,11 @@ func (f *FileSelector) handleSelectorKeys(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 			f.done = true
 			return f, nil
 		}
-		if len(f.files) > 0 {
-			f.selected[f.cursor] = true
-			f.files[f.cursor].Selected = true
+		items := f.buildDisplayList()
+		if f.cursor < len(items) && !items[f.cursor].isFolder {
+			fileIdx := items[f.cursor].fileIndex
+			f.selected[fileIdx] = true
+			f.files[fileIdx].Selected = true
 			f.done = true
 			return f, nil
 		}
@@ -418,8 +442,10 @@ func (f *FileSelector) handleSelectorKeys(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 		}
 
 	case "v":
-		if len(f.files) > 0 && !f.diffLoading {
-			filePath := f.files[f.cursor].Path
+		items := f.buildDisplayList()
+		if f.cursor < len(items) && !items[f.cursor].isFolder && !f.diffLoading {
+			fileIdx := items[f.cursor].fileIndex
+			filePath := f.files[fileIdx].Path
 			f.diffPath = filePath
 			f.splitView = false
 			f.diffLoading = true
@@ -427,8 +453,10 @@ func (f *FileSelector) handleSelectorKeys(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 		}
 
 	case "V":
-		if len(f.files) > 0 && !f.diffLoading {
-			filePath := f.files[f.cursor].Path
+		items := f.buildDisplayList()
+		if f.cursor < len(items) && !items[f.cursor].isFolder && !f.diffLoading {
+			fileIdx := items[f.cursor].fileIndex
+			filePath := f.files[fileIdx].Path
 			f.diffPath = filePath
 			f.splitView = true
 			f.diffLoading = true
@@ -436,8 +464,10 @@ func (f *FileSelector) handleSelectorKeys(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 		}
 
 	case "e":
-		if len(f.files) > 0 {
-			entry := f.files[f.cursor].Path
+		items := f.buildDisplayList()
+		if f.cursor < len(items) && !items[f.cursor].isFolder {
+			fileIdx := items[f.cursor].fileIndex
+			entry := f.files[fileIdx].Path
 			return f, addGitignoreCmd(entry)
 		}
 
@@ -962,28 +992,67 @@ func (f *FileSelector) renderSplitView() string {
 func (f *FileSelector) renderFileList() string {
 	var b strings.Builder
 
-	b.WriteString("选择要提交的文件 (↑↓/j/k 移动，Space 选择，Enter 确认，A 全选，D 取消，v 合并视图，V 分屏对比，e 添加 gitignore，S 确认，Q 退出)\n\n")
+	b.WriteString("选择要提交的文件 (↑↓/j/k 移动，Space 选择，Enter 确认，A 全选，D 取消，v 合并视图，V 分屏对比，e 添加 gitignore，Tab 折叠文件夹，S 确认，Q 退出)\n\n")
 
-	for i, file := range f.files {
+	items := f.buildDisplayList()
+	
+	// Initialize file list viewport if needed
+	if !f.fileListReady && f.termWidth > 0 && f.termHeight > 0 {
+		f.fileListVP = viewport.New(f.termWidth-4, f.termHeight-6)
+		f.fileListVP.Style = lipgloss.NewStyle().Padding(0, 1)
+		f.fileListVP.MouseWheelEnabled = true
+		f.fileListReady = true
+	}
+
+	for i, item := range items {
 		cursor := " "
 		if i == f.cursor {
 			cursor = cursorStyle.Render(">")
 		}
 
-		checkbox := "[ ]"
-		style := normalStyle
-		if f.selected[i] {
-			checkbox = "[✓]"
-			style = selectedStyle
-		}
+		if item.isFolder {
+			// Render folder header
+			collapseIcon := "▼"
+			if f.collapsedFolders[item.folder] {
+				collapseIcon = "▶"
+			}
+			
+			// Count files in this folder
+			fileCount := 0
+			selectedCount := 0
+			for _, fileIdx := range f.getFilesInFolder(item.folder) {
+				fileCount++
+				if f.selected[fileIdx] {
+					selectedCount++
+				}
+			}
+			
+			folderLabel := fmt.Sprintf("%s %s %s (%d/%d)", cursor, collapseIcon, item.folder, selectedCount, fileCount)
+			b.WriteString(folderStyle.Render(folderLabel) + "\n")
+		} else {
+			// Render file with indentation
+			file := f.files[item.fileIndex]
+			checkbox := "[ ]"
+			style := normalStyle
+			if f.selected[item.fileIndex] {
+				checkbox = "[✓]"
+				style = selectedStyle
+			}
 
-		status := "M"
-		if file.Staged {
-			status = "S"
-		}
+			status := "M"
+			if file.Staged {
+				status = "S"
+			}
 
-		line := fmt.Sprintf("%s %s %s %s", cursor, checkbox, status, file.Path)
-		b.WriteString(style.Render(line) + "\n")
+			// Get just the filename (without directory)
+			filename := file.Path
+			if idx := strings.LastIndex(filename, "/"); idx != -1 {
+				filename = filename[idx+1:]
+			}
+
+			line := fmt.Sprintf("  %s %s %s %s", cursor, checkbox, status, filename)
+			b.WriteString(style.Render(line) + "\n")
+		}
 	}
 
 	b.WriteString("\n")
@@ -993,7 +1062,24 @@ func (f *FileSelector) renderFileList() string {
 		b.WriteString("\n" + f.gitignoreMsg)
 	}
 
+	// Use viewport for file list if ready
+	if f.fileListReady {
+		f.fileListVP.SetContent(b.String())
+		return f.fileListVP.View()
+	}
+
 	return b.String()
+}
+
+// getFilesInFolder returns the file indices for a given folder
+func (f *FileSelector) getFilesInFolder(folder string) []int {
+	var indices []int
+	for i, file := range f.files {
+		if getDirectory(file.Path) == folder {
+			indices = append(indices, i)
+		}
+	}
+	return indices
 }
 
 func (f *FileSelector) countSelected() int {
@@ -1004,6 +1090,93 @@ func (f *FileSelector) countSelected() int {
 		}
 	}
 	return count
+}
+
+// getDirectory returns the directory part of a file path
+func getDirectory(path string) string {
+	idx := strings.LastIndex(path, "/")
+	if idx == -1 {
+		return "."
+	}
+	return path[:idx]
+}
+
+// displayItem represents either a folder header or a file in the virtual display list
+type displayItem struct {
+	isFolder  bool
+	folder    string
+	fileIndex int // index into f.files, only valid if !isFolder
+}
+
+// buildDisplayList creates a virtual list of display items with folder grouping
+func (f *FileSelector) buildDisplayList() []displayItem {
+	// Group files by directory
+	folderFiles := make(map[string][]int)
+	var folders []string
+	folderSet := make(map[string]bool)
+
+	for i, file := range f.files {
+		dir := getDirectory(file.Path)
+		if !folderSet[dir] {
+			folderSet[dir] = true
+			folders = append(folders, dir)
+		}
+		folderFiles[dir] = append(folderFiles[dir], i)
+	}
+
+	// Sort folders for consistent ordering
+	sort.Strings(folders)
+
+	// Build display list
+	var items []displayItem
+	for _, folder := range folders {
+		items = append(items, displayItem{isFolder: true, folder: folder})
+		if !f.collapsedFolders[folder] {
+			for _, fileIdx := range folderFiles[folder] {
+				items = append(items, displayItem{isFolder: false, folder: folder, fileIndex: fileIdx})
+			}
+		}
+	}
+
+	return items
+}
+
+// getVisibleFileIndex maps cursor position to actual file index, skipping folder headers
+func (f *FileSelector) getVisibleFileIndex(cursor int) int {
+	items := f.buildDisplayList()
+	if cursor >= len(items) {
+		return -1
+	}
+	item := items[cursor]
+	if item.isFolder {
+		return -1
+	}
+	return item.fileIndex
+}
+
+// moveCursorUp moves cursor up, skipping collapsed folders
+func (f *FileSelector) moveCursorUp() {
+	items := f.buildDisplayList()
+	if f.cursor > 0 {
+		f.cursor--
+	}
+	// Ensure cursor is within bounds
+	if f.cursor >= len(items) {
+		f.cursor = len(items) - 1
+	}
+}
+
+// moveCursorDown moves cursor down, skipping collapsed folders
+func (f *FileSelector) moveCursorDown() {
+	items := f.buildDisplayList()
+	if f.cursor < len(items)-1 {
+		f.cursor++
+	}
+}
+
+// toggleFolderCollapse toggles the collapse state of a folder
+func (f *FileSelector) toggleFolderCollapse(folder string) {
+	f.collapsedFolders[folder] = !f.collapsedFolders[folder]
 }
 
 func (f *FileSelector) GetSelectedFiles() []string {

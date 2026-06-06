@@ -31,3 +31,5 @@ git-ai-commit
 .codegraph/daemon.pid
 
 .codegraph/.gitignore
+
+AGENTS.md
