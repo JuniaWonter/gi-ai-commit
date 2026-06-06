@@ -62,6 +62,11 @@ func AddToGitignore(entry string) error {
 		if out, err := cmd.CombinedOutput(); err != nil {
 			return fmt.Errorf("从 git 追踪中移除失败：%s", strings.TrimSpace(string(out)))
 		}
+		
+		// Unstage the deletion so it doesn't show as a change
+		cmd = exec.Command("git", "reset", "HEAD", "--", entry)
+		cmd.Dir = gitRoot
+		cmd.Run() // Ignore error - might not have anything to reset
 	}
 
 	return nil

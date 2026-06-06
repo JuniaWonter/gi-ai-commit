@@ -52,6 +52,12 @@ func GetChangedFiles() ([]FileChange, error) {
 		// StageFiles 已处理已删除文件（git add -u）
 
 		path := strings.TrimSpace(line[2:])
+		
+		// Skip files that are ignored by git
+		if isIgnored(gitRoot, path) {
+			continue
+		}
+		
 		staged := status[0] != ' '
 
 		if strings.HasSuffix(path, "/") {
@@ -99,6 +105,12 @@ func GetChangedFiles() ([]FileChange, error) {
 	}
 
 	return files, nil
+}
+
+func isIgnored(gitRoot, path string) bool {
+	cmd := exec.Command("git", "check-ignore", "-q", "--no-index", "--", path)
+	cmd.Dir = gitRoot
+	return cmd.Run() == nil
 }
 
 func GetFileDiff(filePath string) (string, error) {

@@ -48,6 +48,8 @@ go test -v ./internal/diff/ -run TestParseNumStat
 
 **Token management**: Estimates tokens at startup; >85% context window triggers compact mode (aggressive truncation + shorter prompt). Conversation history auto-compresses in-memory after each round (keeps last 3 tool results, discards older read_file/list_tree/diff_overview results) to prevent OOM on long sessions.
 
+**Model-specific features**: `ReasoningContent` field (for thinking/reasoning tokens) is only supported by DeepSeek models. Setting it for other models (Qwen, GPT, etc.) causes API errors (`Invalid type for 'messages.[0].content'`). Always check model name before setting `ReasoningContent` on assistant messages.
+
 **Session timeout**: 10-minute timeout protection prevents infinite loops. Timeout errors are distinguished from user cancellations and AI failures in error messages.
 
 **Error handling**: Distinguishes between user cancel (exit 130), AI failure (exit 2), and timeout (exit 4). Error reasons are logged and displayed to users with actionable suggestions.

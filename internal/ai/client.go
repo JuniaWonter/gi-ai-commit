@@ -516,7 +516,8 @@ func (s *CommitSession) StreamAI(send func(chunk StreamChunk)) ([]PendingToolCal
 		Role:    openai.ChatMessageRoleAssistant,
 		Content: strings.TrimSpace(fullContent.String()),
 	}
-	if thinking := fullThinking.String(); thinking != "" {
+	// Only set ReasoningContent for models that support it (DeepSeek)
+	if thinking := fullThinking.String(); thinking != "" && strings.Contains(s.client.config.Model, "deepseek") {
 		assistantMsg.ReasoningContent = thinking
 	}
 	if len(toolCalls) > 0 {
