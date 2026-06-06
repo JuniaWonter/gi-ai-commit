@@ -276,22 +276,22 @@ type CommitResult struct {
 }
 
 // StartCommitSession 启动 ReAct Agent 提交会话。
-// AI 可以自由使用所有工具，通过 ReAct 循环完成：暂存文件 → 理解变更 → 审查风险 → 提交代码。
+// AI 可以自由使用所有工具，通过 ReAct 循环完成：理解变更 → 审查风险 → 提交代码。
 // 工具错误会反馈给 AI，由 AI 决定如何处理，直到成功提交或达到终止条件。
-func (c *Client) StartCommitSession(description string, conventionInfo git.ConventionInfo, maxRetries int, selectedFiles []string, skillMgr *skill.Manager) (*CommitSession, error) {
+func (c *Client) StartCommitSession(diffContent, description string, conventionInfo git.ConventionInfo, maxRetries int, selectedFiles []string, skillMgr *skill.Manager) (*CommitSession, error) {
 	scopeHints := inferScopeHints(selectedFiles)
 
 	memoryContent, _ := memory.Read()
 
 	systemPrompt := buildReActSystemPrompt(conventionInfo, scopeHints, memoryContent, skillMgr)
-	userPrompt := buildReActUserPrompt(selectedFiles, description)
+	userPrompt := buildReActUserPrompt(diffContent, description)
 
 	estimatedTokens := estimateTokenCount(systemPrompt + userPrompt)
 	compactMode := estimatedTokens > 6000
 
 	if compactMode {
 		systemPrompt = buildReActSystemPromptCompact(conventionInfo, scopeHints, memoryContent, skillMgr)
-		userPrompt = buildReActUserPromptCompact(selectedFiles)
+		userPrompt = buildReActUserPromptCompact(diffContent)
 	}
 
 	messages := []openai.ChatCompletionMessage{
@@ -326,11 +326,11 @@ func (c *Client) StartCommitSession(description string, conventionInfo git.Conve
 }
 
 // ContinueCommitSession 从持久化会话继续，使用 ReAct 模式继续审查提交。
-func (c *Client) ContinueCommitSession(ps *PersistableSession, conventionInfo git.ConventionInfo, selectedFiles []string, skillMgr *skill.Manager) (*CommitSession, error) {
+func (c *Client) ContinueCommitSession(ps *PersistableSession, diffContent string, conventionInfo git.ConventionInfo, selectedFiles []string, skillMgr *skill.Manager) (*CommitSession, error) {
 	messages := make([]openai.ChatCompletionMessage, len(ps.Messages))
 	copy(messages, ps.Messages)
 
-	continuePrompt := BuildContinuePrompt(selectedFiles)
+	continuePrompt := BuildContinuePrompt(diffContent)
 	messages = append(messages, openai.ChatCompletionMessage{
 		Role:    openai.ChatMessageRoleUser,
 		Content: continuePrompt,
@@ -2039,7 +2039,7 @@ func buildReActSystemPromptCompact(conventionInfo git.ConventionInfo, scopeHints
 }
 
 // buildReActUserPrompt 构建 ReAct 模式用户提示词
-func buildReActUserPrompt(selectedFiles []string, description string) string {
+func buildReActUserPrompt(diffContent, description string) string {
 	var b strings.Builder
 
 	if description != "" {
@@ -2048,39 +2048,27 @@ func buildReActUserPrompt(selectedFiles []string, description string) string {
 		b.WriteString("\n\n")
 	}
 
-	b.WriteString("用户选择了以下文件准备提交：\n")
-	for _, f := range selectedFiles {
-		b.WriteString("- ")
-		b.WriteString(f)
-		b.WriteString("\n")
-	}
-	b.WriteString("\n")
+	b.WriteString("代码变更：\n")
+	truncatedDiff := truncate(diffContent, 8000)
+	b.WriteString(truncatedDiff)
+	b.WriteString("\n\n")
 
-	b.WriteString("请按以下步骤完成提交：\n")
-	b.WriteString("1. 使用 git_add 暂存这些文件\n")
-	b.WriteString("2. 使用 diff_overview 查看变更概览\n")
-	b.WriteString("3. 必要时使用 read_file 深入阅读关键代码\n")
-	b.WriteString("4. 使用 report_review 输出审查意见\n")
-	b.WriteString("5. 使用 ask_user 确认 commit message\n")
-	b.WriteString("6. 使用 git_commit 提交\n")
-	b.WriteString("\n使用 ReAct 模式：思考 → 行动（调用工具）→ 观察结果 → 继续思考，直到完成提交。\n")
+	b.WriteString("请分析这些变更，审查风险，并生成合适的 commit message 提交。\n")
+	b.WriteString("使用 ReAct 模式：思考 → 行动（调用工具）→ 观察结果 → 继续思考，直到完成提交。\n")
 
 	return b.String()
 }
 
 // buildReActUserPromptCompact ReAct 模式紧凑版用户提示词
-func buildReActUserPromptCompact(selectedFiles []string) string {
+func buildReActUserPromptCompact(diffContent string) string {
 	var b strings.Builder
 
-	b.WriteString("用户选择的文件：\n")
-	for _, f := range selectedFiles {
-		b.WriteString("- ")
-		b.WriteString(f)
-		b.WriteString("\n")
-	}
-	b.WriteString("\n")
+	b.WriteString("代码变更：\n")
+	truncatedDiff := truncateCompact(diffContent, 4000)
+	b.WriteString(truncatedDiff)
+	b.WriteString("\n\n")
 
-	b.WriteString("步骤: git_add 暂存 → diff_overview 查看变更 → read_file(需要时) → report_review → ask_user 确认 → git_commit\n")
+	b.WriteString("步骤: 分析风险 → read_file(需要时) → report_review → ask_user 确认 → git_commit\n")
 
 	return b.String()
 }

@@ -30,11 +30,13 @@ go test -v ./internal/diff/ -run TestParseNumStat
 - `internal/memory/` - Project memory persistence (`.git/ai-memory`)
 - `internal/logger/` - Structured logging to `~/.config/ai-commit/logs/`
 
-**AI tool flow**: User selects files → AI starts immediately → AI uses ReAct loop (Thought → Action → Observation) with all available tools (git_add, diff_overview, read_file, git_status, git_log, report_review, ask_user, git_commit, etc.) → commit → verify
+**AI tool flow**: User selects files → stage → AI starts immediately → AI uses ReAct loop (Thought → Action → Observation) with all available tools (diff_overview, read_file, git_status, git_log, report_review, ask_user, git_commit, etc.) → commit → verify
 
 **ReAct Agent pattern**: AI operates in a continuous loop: (1) Think about current state, (2) Call tools to gather information or take action, (3) Observe results, (4) Repeat until commit succeeds or user cancels. Tool errors are fed back to AI for autonomous error handling.
 
-**Git as a tool**: AI has free access to all Git operations (status/log/branch/stash/add/restore/diff/blame/tag). No rigid execution order. AI uses `git_add` to stage selected files, `diff_overview` to see changes, and `ask_user` to confirm commit message before calling `git_commit`.
+**Git as a tool**: AI has free access to all Git operations (status/log/branch/stash/add/restore/diff/blame/tag). No rigid execution order. AI uses `ask_user` to confirm commit message before calling `git_commit`.
+
+**Basic flow preserved**: TUI stages selected files and computes diff before starting AI session. AI receives diff context immediately, allowing it to focus on review and commit rather than basic setup operations.
 
 **Commit message quality**: The prompt enforces specific, meaningful commit messages. Generic subjects like "提交变更", "添加功能", "修复问题" are explicitly forbidden. The AI must describe what was actually changed (e.g., "feat(auth): 添加 OAuth2 登录支持").
 
