@@ -273,8 +273,16 @@ func parseDiffRanges(diff string) []lineRange {
 // findContainingFunction finds the function that contains the given line
 // This is a simplified heuristic - looks for "func " keyword
 func findContainingFunction(lines []string, targetLine int) (start, end int, name string) {
+	// Bounds checking
+	if len(lines) == 0 || targetLine < 0 || targetLine >= len(lines) {
+		return 0, 0, ""
+	}
+
 	// Search backwards for function start
 	for i := targetLine; i >= 0; i-- {
+		if i >= len(lines) {
+			continue
+		}
 		line := strings.TrimSpace(lines[i])
 		if strings.HasPrefix(line, "func ") {
 			start = i
