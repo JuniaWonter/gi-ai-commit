@@ -77,6 +77,14 @@ go test -v ./internal/diff/ -run TestParseNumStat
 - **renderMarkdown** needs `Width()` set on all lines for wrapping
 - **Viewport sizing**: `SetViewportSize` must be called once after Panel creation; `WindowSizeMsg` must forward to Panel on resize
 
+## TUI features
+
+**Mouse scrolling**: All panels (streaming, done, file selector) support mouse wheel scrolling. `tea.WithMouseCellMotion()` is enabled at program level, and viewports have `MouseWheelEnabled = true`.
+
+**Smart auto-scroll**: Streaming panel only auto-scrolls to bottom if user is already near the bottom (within 3 lines). If user scrolls up to read history, new content won't snap them back to bottom.
+
+**File selector folder grouping**: Files are grouped by directory with collapsible folders. Use `Tab` to toggle folder collapse. Folder headers show selection count (e.g., `▼ src (3/5)`). Files are indented under their parent folder. Navigation keys (↑↓/j/k) work with the virtual display list that includes folder headers.
+
 ## File type priority
 
 `internal/git/priority.go` weights files: core (1.5x), test (0.3x), config (0.5x), generated (0.1x)
