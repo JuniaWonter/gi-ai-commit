@@ -61,7 +61,7 @@ func (p *DiffProcessor) BuildPayloadsForFiles(files []string) ([]DiffPayload, er
 	if len(files) == 0 {
 		fullDiff, err = p.getAllDiff()
 	} else {
-		args := append([]string{"diff", "--cached", "--no-ext-diff", "--unified=1", "--"}, files...)
+		args := append([]string{"diff", "--cached", "--no-ext-diff", "--unified=5", "--"}, files...)
 		fullDiff, err = p.getCmdOutput("git", args...)
 	}
 	if err != nil {
@@ -73,8 +73,8 @@ func (p *DiffProcessor) BuildPayloadsForFiles(files []string) ([]DiffPayload, er
 }
 
 func (p *DiffProcessor) getAllDiff() (string, error) {
-	cached, _ := p.getCmdOutput("git", "diff", "--cached", "--no-ext-diff", "--unified=1")
-	unstaged, _ := p.getCmdOutput("git", "diff", "--no-ext-diff", "--unified=1")
+	cached, _ := p.getCmdOutput("git", "diff", "--cached", "--no-ext-diff", "--unified=5")
+	unstaged, _ := p.getCmdOutput("git", "diff", "--no-ext-diff", "--unified=5")
 
 	diff := strings.TrimSpace(cached) + "\n" + strings.TrimSpace(unstaged)
 	diff = strings.TrimSpace(diff)
@@ -234,7 +234,7 @@ func (p *DiffProcessor) getDiffStatAndNameStatus(files []string) (string, string
 }
 
 func (p *DiffProcessor) getStagedDiff() (string, error) {
-	return p.getCmdOutput("git", "diff", "--cached", "--no-ext-diff", "--unified=1")
+	return p.getCmdOutput("git", "diff", "--cached", "--no-ext-diff", "--unified=5")
 }
 
 func (p *DiffProcessor) getCmdOutput(name string, args ...string) (string, error) {

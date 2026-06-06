@@ -925,6 +925,15 @@ func executeToolCall(name, argsJSON string) string {
 		}
 		return git.GetFileDiff(args.Path, args.ContextLines)
 
+	case "analyze_changed_functions":
+		var args struct {
+			Path string `json:"path"`
+		}
+		if err := json.Unmarshal(json.RawMessage(argsJSON), &args); err != nil {
+			return fmt.Sprintf("ERROR: 解析参数失败：%v", err)
+		}
+		return git.AnalyzeChangedFunctions(args.Path)
+
 	case "git_commit":
 		var args struct {
 			Message string `json:"message"`
@@ -1554,6 +1563,14 @@ func buildReActSystemPrompt(conventionInfo git.ConventionInfo, scopeHints []stri
 	b.WriteString("简单变更（注释/单行修复/配置微调）可设 is_simple=true 跳过详细审查。\n")
 	b.WriteString("先读代码再判断，commit message 描述变更本身不是审查结论。\n")
 	b.WriteString("diff 可能被截断，用 read_file 补全。控制输出长度节约 token。\n\n")
+	
+	b.WriteString("【深度理解代码变更】\n")
+	b.WriteString("1. 阅读完整函数定义：diff 只显示变更行，必须用 read_file 读取变更函数的完整定义，理解整体逻辑\n")
+	b.WriteString("2. 理解变更意图：问自己「为什么要改这里？」，是修复 bug、添加功能、还是重构优化？\n")
+	b.WriteString("3. 分析影响范围：变更是否影响其他函数？是否需要更新调用方？是否有副作用？\n")
+	b.WriteString("4. 关注边界条件：新增的逻辑是否处理了空值、异常、并发等边界情况？\n")
+	b.WriteString("5. 验证逻辑完整性：变更后的代码逻辑是否自洽？是否有遗漏的分支或条件？\n\n")
+	
 	b.WriteString("Git 工具: 可自由使用 git_status/log/branch/diff_unstaged/add/restore/stash/blame/tag\n")
 	b.WriteString("建议流程: 分析风险 → read_file(需要时) → report_review → ask_user 确认 message → git_commit\n")
 	b.WriteString("⚠️ 最终目标是调用 git_commit 完成提交。\n")
@@ -1593,6 +1610,7 @@ func buildReActSystemPromptCompact(conventionInfo git.ConventionInfo, scopeHints
 	b.WriteString("简单变更（注释/单行修复/配置微调）可设 is_simple=true 跳过详细审查。\n")
 	b.WriteString("先读代码再判断，commit message 描述变更本身不是审查结论。\n")
 	b.WriteString("diff 可能被截断，用 read_file 补全。控制输出长度节约 token。\n\n")
+	b.WriteString("深度理解：用 read_file 读取变更函数的完整定义，理解变更意图和影响范围，关注边界条件和逻辑完整性。\n\n")
 	b.WriteString("Git 工具: 可自由使用 git_status/log/branch/diff_unstaged/add/restore/stash/blame/tag\n")
 	b.WriteString("建议流程: 分析风险 → read_file(需要时) → report_review → ask_user 确认 message → git_commit\n")
 	b.WriteString("⚠️ 最终目标是调用 git_commit 完成提交。\n")

@@ -46,6 +46,11 @@ go test -v ./internal/diff/ -run TestParseNumStat
 
 **Large change handling**: Enhanced diff_overview tool provides file type categorization (core/test/config/generated/docs) to help AI prioritize. System prompt includes 4-step strategy: (1) global scan, (2) priority ranking, (3) deep reading with context, (4) cross-file impact analysis. Initial diff limits increased to 8000 chars (normal) / 4000 chars (compact) for better context.
 
+**Code understanding enhancements**: Three improvements to help AI better understand code changes:
+1. **Enhanced diff context**: Changed from `--unified=1` to `--unified=5` to show more surrounding code context in diffs
+2. **Deep understanding prompt**: System prompt now includes guidance for reading complete function definitions, understanding change intent, analyzing impact scope, checking boundary conditions, and verifying logic completeness
+3. **analyze_changed_functions tool**: New tool that extracts complete function definitions for changed code. For Go files, uses AST-based heuristics to identify functions containing changes and returns their full code with line numbers. For other languages, returns enhanced diff with 10 lines of context.
+
 **Token management**: Estimates tokens at startup; >85% context window triggers compact mode (aggressive truncation + shorter prompt). Conversation history auto-compresses in-memory after each round (keeps last 3 tool results, discards older read_file/list_tree/diff_overview results) to prevent OOM on long sessions.
 
 **Model-specific features**: `ReasoningContent` field (for thinking/reasoning tokens) is only supported by DeepSeek models. Setting it for other models (Qwen, GPT, etc.) causes API errors (`Invalid type for 'messages.[0].content'`). Always check model name before setting `ReasoningContent` on assistant messages.

@@ -99,6 +99,20 @@ var ToolDefinitions = []ToolDefinition{
 		}`),
 	},
 	{
+		Name:        "analyze_changed_functions",
+		Description: "分析变更文件中被修改的函数，提取这些函数的完整定义。帮助深入理解变更的逻辑上下文，而不仅仅是看 diff 的几行变更。返回每个变更函数的完整代码、行号范围和变更说明。",
+		Parameters: json.RawMessage(`{
+			"type": "object",
+			"properties": {
+				"path": {
+					"type": "string",
+					"description": "相对于项目根目录的文件路径"
+				}
+			},
+			"required": ["path"]
+		}`),
+	},
+	{
 		Name:        "search_references",
 		Description: "搜索代码库中指定符号（函数名、类型名、变量名）的引用位置。用于判断改动的波及范围，比如改了某个函数后看还有哪些地方调用了它。返回匹配的文件路径、行号和代码片段。",
 		Parameters: json.RawMessage(`{
