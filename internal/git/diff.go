@@ -7,6 +7,30 @@ import (
 	"strings"
 )
 
+// GetStagedFiles returns a list of staged file paths
+func GetStagedFiles() ([]string, error) {
+	gitRoot, err := GetGitRoot()
+	if err != nil {
+		return nil, err
+	}
+
+	cmd := exec.Command("git", "diff", "--cached", "--name-only", "--")
+	cmd.Dir = gitRoot
+	out, err := cmd.Output()
+	if err != nil {
+		return nil, fmt.Errorf("获取暂存文件列表失败：%w", err)
+	}
+
+	lines := strings.Split(strings.TrimSpace(string(out)), "\n")
+	var files []string
+	for _, line := range lines {
+		if line != "" {
+			files = append(files, line)
+		}
+	}
+	return files, nil
+}
+
 // GetDiffOverview returns a compact overview of staged changes:
 // git diff --stat and git diff --name-status
 func GetDiffOverview() string {

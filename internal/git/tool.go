@@ -431,6 +431,71 @@ var ToolDefinitions = []ToolDefinition{
 			"required": ["question"]
 		}`),
 	},
+	{
+		Name:        "manage_tasks",
+		Description: "管理审查任务列表。用于追踪审查进度、记录发现的问题、协调多步骤工作流。支持创建任务列表、添加任务、更新状态、查询待办事项。建议在审查开始时创建任务列表，确保所有变更文件都被分析。",
+		Parameters: json.RawMessage(`{
+			"type": "object",
+			"properties": {
+				"action": {
+					"type": "string",
+					"enum": ["create", "add", "update", "list", "complete"],
+					"description": "操作类型：create=创建任务列表, add=添加任务, update=更新任务, list=查询任务, complete=标记完成"
+				},
+				"auto_generate": {
+					"type": "boolean",
+					"description": "create 时是否自动从 staged files 生成任务列表（默认 false）"
+				},
+				"tasks": {
+					"type": "array",
+					"items": {
+						"type": "object",
+						"properties": {
+							"title": {
+								"type": "string",
+								"description": "任务标题"
+							},
+							"type": {
+								"type": "string",
+								"enum": ["analysis", "review", "issue", "note"],
+								"description": "任务类型：analysis=分析文件, review=审查步骤, issue=发现的问题, note=备注"
+							},
+							"priority": {
+								"type": "string",
+								"enum": ["high", "medium", "low"],
+								"description": "优先级（默认 medium）"
+							},
+							"file": {
+								"type": "string",
+								"description": "相关的文件路径（可选）"
+							}
+						},
+						"required": ["title"]
+					},
+					"description": "create 或 add 时的任务列表"
+				},
+				"task_id": {
+					"type": "string",
+					"description": "update 或 complete 时的任务 ID"
+				},
+				"status": {
+					"type": "string",
+					"enum": ["pending", "in_progress", "completed"],
+					"description": "update 时的新状态"
+				},
+				"notes": {
+					"type": "string",
+					"description": "update 或 complete 时的备注信息（可选）"
+				},
+				"filter_status": {
+					"type": "string",
+					"enum": ["pending", "in_progress", "completed", "all"],
+					"description": "list 时的过滤条件（默认 all）"
+				}
+			},
+			"required": ["action"]
+		}`),
+	},
 }
 
 func FindToolDef(name string) *ToolDefinition {

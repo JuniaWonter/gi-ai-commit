@@ -173,6 +173,7 @@ type CommitSession struct {
 	maxUpdateMemoryCalls int
 	compactMode          bool
 	noToolCallFallback   bool
+	noToolCallCount      int
 	toolCache            map[string]string
 	readFiles            map[string]bool
 	mu                   sync.Mutex
@@ -182,9 +183,22 @@ type CommitSession struct {
 	skillManager *skill.Manager
 	// 用户输入（用于 ask_user 工具）
 	askUserAnswer string
+	// 任务管理
+	tasks     map[string]*Task
+	taskOrder []string
 	// 会话超时保护
 	startTime   time.Time
 	maxDuration time.Duration
+}
+
+type Task struct {
+	ID       string
+	Title    string
+	Type     string // analysis, review, issue, note
+	Priority string // high, medium, low
+	File     string
+	Status   string // pending, in_progress, completed
+	Notes    string
 }
 
 type ReviewResult struct {
@@ -574,12 +588,55 @@ func (s *CommitSession) StreamAI(send func(chunk StreamChunk)) ([]PendingToolCal
 			return []PendingToolCall{fallbackTC}, nil
 		}
 
-		// 正常情况：AI 输出了文本但没有调用工具
-		// 这是 ReAct 模式的一部分 - AI 可能在思考或输出中间结果
-		// 返回空 pending，让 ExecuteAndResumeWithStream 决定是否继续
-		s.commitMsg = msg
-		return nil, nil
+		// AI 输出了文本但没有调用工具
+		// 记录日志以便调试
+		logger.Debug("AI 未调用工具，输出内容: %d 字符", len(msg))
+		if len(msg) > 200 {
+			logger.Debug("AI 输出前200字符: %s", msg[:200])
+		} else {
+			logger.Debug("AI 完整输出: %s", msg)
+		}
+		
+		// 如果 AI 多次没有调用工具，发送提醒消息
+		if s.noToolCallCount >= 2 {
+			logger.Warn("AI 连续 %d 次未调用工具，强制使用 fallback", s.noToolCallCount)
+			// 尝试从输出中提取 commit message
+			extractedMsg := extractCommitMessageFromTruncated(msg)
+			if extractedMsg == "" {
+				extractedMsg = "chore: 提交变更"
+			}
+			fallbackTC := PendingToolCall{
+				ID:       "fallback_commit_notool",
+				Name:     "git_commit",
+				ArgsJSON: fmt.Sprintf(`{"message": "%s"}`, escapeJSON(extractedMsg)),
+				Args: map[string]interface{}{
+					"message": extractedMsg,
+				},
+			}
+			return []PendingToolCall{fallbackTC}, nil
+		}
+		
+		// 发送提醒消息，让 AI 继续调用工具
+		s.noToolCallCount++
+		logger.Info("AI 未调用工具，发送提醒消息 (%d/2)", s.noToolCallCount)
+		
+		reminder := "⚠️ 你还没有调用任何工具。请记住：\n" +
+			"1. 你必须调用 git_commit 工具来完成提交\n" +
+			"2. 如果需要审查，先调用 report_review\n" +
+			"3. 如果需要确认，调用 ask_user\n" +
+			"4. 如果已经准备好，立即调用 git_commit\n\n" +
+			"请立即调用工具继续。"
+		
+		s.messages = append(s.messages, openai.ChatCompletionMessage{
+			Role:    openai.ChatMessageRoleUser,
+			Content: reminder,
+		})
+		
+		return s.StreamAI(send)
 	}
+
+	// Reset counter when tools are successfully called
+	s.noToolCallCount = 0
 
 	var pending []PendingToolCall
 	for _, tc := range toolCalls {
@@ -1319,6 +1376,217 @@ func (s *CommitSession) executeToolCallWithLimit(name, argsJSON string) string {
 			return fmt.Sprintf("USER_ANSWER: %s", answer)
 		}
 		return "ERROR: 用户未提供回答"
+
+	case "manage_tasks":
+		var args struct {
+			Action       string `json:"action"`
+			AutoGenerate bool   `json:"auto_generate"`
+			Tasks        []struct {
+				Title    string `json:"title"`
+				Type     string `json:"type"`
+				Priority string `json:"priority"`
+				File     string `json:"file"`
+			} `json:"tasks"`
+			TaskID       string `json:"task_id"`
+			Status       string `json:"status"`
+			Notes        string `json:"notes"`
+			FilterStatus string `json:"filter_status"`
+		}
+		if err := json.Unmarshal(json.RawMessage(argsJSON), &args); err != nil {
+			return fmt.Sprintf("ERROR: 解析参数失败：%v", err)
+		}
+
+		s.mu.Lock()
+		defer s.mu.Unlock()
+
+		// Initialize task storage if needed
+		if s.tasks == nil {
+			s.tasks = make(map[string]*Task)
+			s.taskOrder = []string{}
+		}
+
+		switch args.Action {
+		case "create":
+			if args.AutoGenerate {
+				// Auto-generate from staged files
+				stagedFiles, err := git.GetStagedFiles()
+				if err != nil {
+					return fmt.Sprintf("ERROR: 获取暂存文件列表失败：%v", err)
+				}
+				if len(stagedFiles) == 0 {
+					return "TASKS_CREATED: 没有暂存的文件，无需创建任务"
+				}
+
+				// Create analysis task for each file
+				for _, file := range stagedFiles {
+					id := fmt.Sprintf("task_%d", len(s.taskOrder)+1)
+					title := fmt.Sprintf("分析文件: %s", file)
+					s.tasks[id] = &Task{
+						ID:       id,
+						Title:    title,
+						Type:     "analysis",
+						Priority: "medium",
+						File:     file,
+						Status:   "pending",
+					}
+					s.taskOrder = append(s.taskOrder, id)
+				}
+
+				// Add review and commit tasks
+				reviewID := fmt.Sprintf("task_%d", len(s.taskOrder)+1)
+				s.tasks[reviewID] = &Task{
+					ID:       reviewID,
+					Title:    "执行代码审查",
+					Type:     "review",
+					Priority: "high",
+					Status:   "pending",
+				}
+				s.taskOrder = append(s.taskOrder, reviewID)
+
+				commitID := fmt.Sprintf("task_%d", len(s.taskOrder)+1)
+				s.tasks[commitID] = &Task{
+					ID:       commitID,
+					Title:    "生成 commit message 并提交",
+					Type:     "review",
+					Priority: "high",
+					Status:   "pending",
+				}
+				s.taskOrder = append(s.taskOrder, commitID)
+
+				return fmt.Sprintf("TASKS_CREATED: 已自动生成 %d 个任务（%d 个文件分析 + 审查 + 提交）", len(s.taskOrder), len(stagedFiles))
+			}
+			// Create tasks from provided list
+			for i, t := range args.Tasks {
+				id := fmt.Sprintf("task_%d", len(s.taskOrder)+1)
+				priority := t.Priority
+				if priority == "" {
+					priority = "medium"
+				}
+				taskType := t.Type
+				if taskType == "" {
+					taskType = "analysis"
+				}
+				s.tasks[id] = &Task{
+					ID:       id,
+					Title:    t.Title,
+					Type:     taskType,
+					Priority: priority,
+					File:     t.File,
+					Status:   "pending",
+				}
+				s.taskOrder = append(s.taskOrder, id)
+				_ = i // suppress unused variable warning
+			}
+			return fmt.Sprintf("TASKS_CREATED: 已创建 %d 个任务", len(args.Tasks))
+
+		case "add":
+			for _, t := range args.Tasks {
+				id := fmt.Sprintf("task_%d", len(s.taskOrder)+1)
+				priority := t.Priority
+				if priority == "" {
+					priority = "medium"
+				}
+				taskType := t.Type
+				if taskType == "" {
+					taskType = "analysis"
+				}
+				s.tasks[id] = &Task{
+					ID:       id,
+					Title:    t.Title,
+					Type:     taskType,
+					Priority: priority,
+					File:     t.File,
+					Status:   "pending",
+				}
+				s.taskOrder = append(s.taskOrder, id)
+			}
+			return fmt.Sprintf("TASKS_ADDED: 已添加 %d 个任务", len(args.Tasks))
+
+		case "update":
+			if args.TaskID == "" {
+				return "ERROR: task_id 不能为空"
+			}
+			task, exists := s.tasks[args.TaskID]
+			if !exists {
+				return fmt.Sprintf("ERROR: 任务 %s 不存在", args.TaskID)
+			}
+			if args.Status != "" {
+				task.Status = args.Status
+			}
+			if args.Notes != "" {
+				task.Notes = args.Notes
+			}
+			return fmt.Sprintf("TASK_UPDATED: 任务 %s 已更新", args.TaskID)
+
+		case "complete":
+			if args.TaskID == "" {
+				return "ERROR: task_id 不能为空"
+			}
+			task, exists := s.tasks[args.TaskID]
+			if !exists {
+				return fmt.Sprintf("ERROR: 任务 %s 不存在", args.TaskID)
+			}
+			task.Status = "completed"
+			if args.Notes != "" {
+				task.Notes = args.Notes
+			}
+			return fmt.Sprintf("TASK_COMPLETED: 任务 %s 已完成", args.TaskID)
+
+		case "list":
+			filterStatus := args.FilterStatus
+			if filterStatus == "" {
+				filterStatus = "all"
+			}
+
+			var result strings.Builder
+			result.WriteString("TASK_LIST:\n")
+
+			pendingCount := 0
+			inProgressCount := 0
+			completedCount := 0
+
+			for _, id := range s.taskOrder {
+				task := s.tasks[id]
+				if filterStatus != "all" && task.Status != filterStatus {
+					continue
+				}
+
+				statusIcon := "○"
+				if task.Status == "in_progress" {
+					statusIcon = "◐"
+					inProgressCount++
+				} else if task.Status == "completed" {
+					statusIcon = "✓"
+					completedCount++
+				} else {
+					pendingCount++
+				}
+
+				priorityIcon := ""
+				if task.Priority == "high" {
+					priorityIcon = "🔴"
+				} else if task.Priority == "medium" {
+					priorityIcon = "🟡"
+				} else {
+					priorityIcon = "🟢"
+				}
+
+				result.WriteString(fmt.Sprintf("%s %s [%s] %s", statusIcon, priorityIcon, id, task.Title))
+				if task.File != "" {
+					result.WriteString(fmt.Sprintf(" (%s)", task.File))
+				}
+				if task.Notes != "" {
+					result.WriteString(fmt.Sprintf("\n   备注: %s", task.Notes))
+				}
+				result.WriteString("\n")
+			}
+
+			result.WriteString(fmt.Sprintf("\n统计: %d 待办, %d 进行中, %d 已完成", pendingCount, inProgressCount, completedCount))
+			return result.String()
+
+		default:
+			return fmt.Sprintf("ERROR: 未知的 action: %s", args.Action)
+		}
 	}
 
 	// Check if it's a skill tool
@@ -1571,6 +1839,14 @@ func buildReActSystemPrompt(conventionInfo git.ConventionInfo, scopeHints []stri
 	b.WriteString("4. 关注边界条件：新增的逻辑是否处理了空值、异常、并发等边界情况？\n")
 	b.WriteString("5. 验证逻辑完整性：变更后的代码逻辑是否自洽？是否有遗漏的分支或条件？\n\n")
 	
+	b.WriteString("【任务管理】\n")
+	b.WriteString("使用 manage_tasks 工具追踪审查进度，确保所有变更文件都被分析：\n")
+	b.WriteString("- 审查开始时调用 manage_tasks(action='create', auto_generate=true) 自动生成任务列表\n")
+	b.WriteString("- 分析每个文件后调用 manage_tasks(action='complete', task_id='xxx') 标记完成\n")
+	b.WriteString("- 发现问题时调用 manage_tasks(action='add', tasks=[{title:'...', type:'issue'}]) 记录\n")
+	b.WriteString("- 使用 manage_tasks(action='list') 查看当前进度\n")
+	b.WriteString("任务管理帮助协调多步骤工作流，避免遗漏文件分析。\n\n")
+	
 	b.WriteString("Git 工具: 可自由使用 git_status/log/branch/diff_unstaged/add/restore/stash/blame/tag\n")
 	b.WriteString("建议流程: 分析风险 → read_file(需要时) → report_review → ask_user 确认 message → git_commit\n")
 	b.WriteString("⚠️ 最终目标是调用 git_commit 完成提交。\n")
@@ -1611,6 +1887,7 @@ func buildReActSystemPromptCompact(conventionInfo git.ConventionInfo, scopeHints
 	b.WriteString("先读代码再判断，commit message 描述变更本身不是审查结论。\n")
 	b.WriteString("diff 可能被截断，用 read_file 补全。控制输出长度节约 token。\n\n")
 	b.WriteString("深度理解：用 read_file 读取变更函数的完整定义，理解变更意图和影响范围，关注边界条件和逻辑完整性。\n\n")
+	b.WriteString("任务管理: 用 manage_tasks 追踪进度，create(auto_generate=true)自动生成，complete标记完成，list查看进度。\n\n")
 	b.WriteString("Git 工具: 可自由使用 git_status/log/branch/diff_unstaged/add/restore/stash/blame/tag\n")
 	b.WriteString("建议流程: 分析风险 → read_file(需要时) → report_review → ask_user 确认 message → git_commit\n")
 	b.WriteString("⚠️ 最终目标是调用 git_commit 完成提交。\n")
