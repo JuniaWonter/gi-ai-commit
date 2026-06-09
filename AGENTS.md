@@ -34,6 +34,8 @@ go test -v ./internal/diff/ -run TestParseNumStat
 
 **ReAct Agent pattern**: AI operates in a continuous loop: (1) Think about current state, (2) Call tools to gather information or take action, (3) Observe results, (4) Repeat until commit succeeds or user cancels. Tool errors are fed back to AI for autonomous error handling.
 
+**No-tool-call handling**: If AI outputs text without calling any tools, the system sends a reminder message (up to 2 times) prompting the AI to call tools. After 2 consecutive no-tool-call responses, a fallback commit is forced using extracted or default commit message. This prevents the AI from "giving up" without committing.
+
 **Git as a tool**: AI has free access to all Git operations (status/log/branch/stash/add/restore/diff/blame/tag). No rigid execution order. AI uses `ask_user` to confirm commit message before calling `git_commit`.
 
 **Basic flow preserved**: TUI stages selected files and computes diff before starting AI session. AI receives diff context immediately, allowing it to focus on review and commit rather than basic setup operations.
@@ -50,6 +52,13 @@ go test -v ./internal/diff/ -run TestParseNumStat
 1. **Enhanced diff context**: Changed from `--unified=1` to `--unified=5` to show more surrounding code context in diffs
 2. **Deep understanding prompt**: System prompt now includes guidance for reading complete function definitions, understanding change intent, analyzing impact scope, checking boundary conditions, and verifying logic completeness
 3. **analyze_changed_functions tool**: New tool that extracts complete function definitions for changed code. For Go files, uses AST-based heuristics to identify functions containing changes and returns their full code with line numbers. For other languages, returns enhanced diff with 10 lines of context.
+
+**Task management**: `manage_tasks` tool helps AI track review progress and coordinate multi-step workflows:
+- **Auto-generation**: `manage_tasks(action='create', auto_generate=true)` creates analysis tasks for each staged file, plus review and commit tasks
+- **Progress tracking**: AI marks tasks as completed after analyzing each file, ensuring no files are missed
+- **Issue recording**: AI can add issue-type tasks to record problems found during review
+- **Workflow coordination**: Helps AI plan and execute complex review tasks systematically
+- Task storage is in-memory within CommitSession, persisted only for the current session
 
 **Token management**: Estimates tokens at startup; >85% context window triggers compact mode (aggressive truncation + shorter prompt). Conversation history auto-compresses in-memory after each round (keeps last 3 tool results, discards older read_file/list_tree/diff_overview results) to prevent OOM on long sessions.
 
